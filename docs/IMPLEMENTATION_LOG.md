@@ -1,0 +1,105 @@
+# Detect 事件管理后台 — 实施日志
+
+> 本日志逐步记录实施内容、决策依据与验证结果。接口契约以
+> `yolo26/docs/superpowers/specs/2026-09-10-event-management-api-design.md` 为准。
+> 非侵入约束：Python(yolo26) 端通过 webhook POST 推事件，据响应 `code==0` 判成功，请求头带 `from: Y`；Java 端不得改动此契约。
+
+## 项目概览
+
+- **架构**：pig 风格 Spring Cloud 多模块微服务
+- **版本矩阵**：JDK 17 / Spring Boot 3.2.4 / Spring Cloud 2023.0.1 / Spring Cloud Alibaba 2023.0.1.0 / Nacos Server 2.3.2 / MyBatis-Plus 3.5.5(`mybatis-plus-spring-boot3-starter`) / MinIO 8.5.7 / Hutool 5.8.27
+- **坐标**：groupId `com.detect`，version `1.0.0`
+- **端口规划**：gateway 8080 / auth 8081 / event 8082
+- **基础设施(docker-compose)**：MySQL 3307(root/root) / Nacos 8848,9848 / Redis 6379 / MinIO 9000,9001(minioadmin/minioadmin)
+- **本地环境**：Maven 仓库 `D:\apachemaven\apache-maven-3.9.14\mvn-repo`；JDK `C:\Users\HP\JDK\jdk-17.0.18.8-hotspot`
+
+## 模块结构
+
+```
+detect(父 pom)
+├─ detect-common(聚合)
+│  ├─ detect-common-core       统一响应/异常/常量/@Inner+AOP
+│  ├─ detect-common-mybatis    BaseEntity/逻辑删除/自动填充/分页插件
+│  ├─ detect-common-security   资源服务器 JWT 验签/SecurityUtils/@Inner 放行
+│  └─ detect-common-oss        MinIO 对象存储封装
+├─ detect-auth                 认证服务器(签发 JWT)
+├─ detect-gateway              网关(路由/跨域/聚合鉴权)   [待建]
+└─ detect-modules
+   └─ detect-event             事件业务(CRUD/规则/统计/导出) [待建]
+```
+
+## 全局约定
+
+- **统一响应 `R<T>`**：`{code,msg,data}`，成功 `code=0`
+- **分页 `PageResult<T>`**：`{records,total,current,size,pages}`
+- **逻辑删除**：`del_flag`(0 正常 / 1 删除)，`@TableLogic(value="0",delval="1")`
+- **`@Inner` + AOP**：校验请求头 `from: Y`，用于内部免鉴权接口(如 webhook receive)
+- **鉴权模型(规格 §2.1)**：前端接口 `/admin/**` 用 JWT Bearer；内部接口 `@Inner` 免鉴权须带 `from: Y`；无 RBAC 矩阵，仅要求"已登录"
+- **Token 声明契约**(auth 签发 ↔ common-security 验签对齐)：`iss / sub=username / user_id(Long) / username / authorities(List<String>, 如 ROLE_ADMIN) / iat / exp`
+- **自动配置**：common 库模块不加 `@Component`，用 `META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports` 注册；Servlet 相关 Bean 加 `@ConditionalOnWebApplication(SERVLET)` 以免 reactive 网关误加载
+
+---
+
+## Step 1-2：基础设施 + 多模块骨架  ✅ 已完成
+
+- docker-compose 起 MySQL/Nacos/Redis/MinIO，全部 healthy
+- 建库 `detect_auth` / `detect_event`(`sql/init/01-databases.sql`)
+- 父 pom：`dependencyManagement` 导入 SB/SC/SCA BOM + mybatis-plus/minio/hutool + 4 个内部 common 模块；全局 lombok(optional)
+- 提交：`a10f910 feat：初始框架`
+
+## Step 3：detect-common 四模块  ✅ 已完成(BUILD SUCCESS，11 单测全绿)
+
+| 模块 | 关键产物 | 单测 |
+|---|---|---|
+| core | CommonConstants / ResultCode / R / PageResult / BizException / GlobalExceptionHandler / @Inner / InnerAspect / CoreAutoConfiguration | 3 |
+| mybatis | BaseEntity(create_time/update_time/del_flag) / MetaObjectHandler 自动填充 / MybatisPlusConfig(分页+乐观锁插件) | 1 |
+| security | LoginUser / SecurityUtils / DetectJwtAuthenticationConverter / 401·403 处理器 / PermitAllUrlProperties(扫描 @Inner) / 资源服务器自动配置 | 3 |
+| oss | OssProperties / OssUtils(纯函数) / OssTemplate(MinIO 上传下载) / OssAutoConfiguration | 4 |
+
+- **踩坑**：自建子模块 pom 初始为空壳(仅 parent+artifactId)，需逐个补 `dependencies`，否则"程序包不存在"
+- **踩坑**：Maven 项目 Java 源码必须置于 `src/main/java/<包路径>` 下，IDE 脚手架残留的 `com/detect/Main.java` 已删除
+
+## Step 4：detect-auth 认证服务器  ✅ 已完成(编译 + 7 单测 + 运行时端到端全绿)
+
+### 架构决策(经用户确认)
+
+1. **用户存储**：DB 表 `detect_auth.sys_user`(非内存/配置文件)
+2. **密码授权**：轻量自定义 `POST /oauth/token` 密码端点(不引入完整 Spring Authorization Server)
+3. **签名密钥**：持久化 keystore `jwt.jks`(RSA 2048，别名 `detect-jwt`，有效期 3650 天)
+
+### 关键文件
+
+- `AuthApplication`(`@SpringBootApplication` + `@MapperScan`)
+- `entity/SysUser`(extends BaseEntity) + `mapper/SysUserMapper`
+- `service/DetectUserDetails`(携带 userId 的 UserDetails) + `DetectUserDetailsService`(读 sys_user，角色映射 `ROLE_{role}`)
+- `config/JwtKeyProperties`(前缀 `detect.auth.jwt`) + `JwtKeyConfig`(从 JKS 加载 nimbus `RSAKey`，fail-fast)
+- `service/JwtService`(`NimbusJwtEncoder` 签发 + `jwkSet()` 仅暴露公钥)
+- `web/OAuth2Controller`(`POST /oauth/token`、`GET /oauth2/jwks`，均免鉴权)
+- `config/AuthSecurityConfig`(BCrypt + DaoAuthenticationProvider + 无状态 SecurityFilterChain)
+- `config/AuthDataInitializer`(启动幂等播种 admin/123456，BCrypt，不硬编码哈希)
+- `resources/application.yml`(端口 8081 / MySQL 3307 / jwt 配置，敏感项走环境变量默认值)
+- `sql/init/02-auth-schema.sql`(sys_user 建表)
+
+### 验证结果
+
+- **编译 + 单测**：`mvn -pl detect-auth -am clean install` EXIT=0；7 单测全绿(JwtServiceTest 2 / DetectUserDetailsServiceTest 3 / OAuth2ControllerTest 2)
+- **打包修复**：父 pom 的 `spring-boot-maven-plugin` 缺 `repackage` execution → 产出瘦 jar(23KB)；补 execution 后 fat jar 34.76MB + `.jar.original`
+- **建表**：`docker cp` SQL 进容器 source，`sys_user` 建成
+- **运行时**(java -jar 启动，3.96s)：
+  - keystore 加载成功；AuthDataInitializer 播种 admin(逻辑删除自动追加 `WHERE del_flag='0'`，自动填充时间戳)
+  - `POST /oauth/token`(admin/123456) → 合法 JWT，payload 声明 `{sub:admin, user_id:1, iss:http://localhost:8081, authorities:[ROLE_ADMIN], username:admin, iat, exp}` **完全匹配契约**
+  - `GET /oauth2/jwks` → 仅公钥(kty/e/kid/n，无 d)
+  - 错误密码 → HTTP 400 + `{"error":"invalid_grant"}`
+
+### 安全备注
+
+- `jwt.jks` 已被 `.gitignore` 排除(密钥不入库)；其他环境需用 keytool 生成或经 CI secret 注入
+- keytool 生成命令见本步骤；keystore 密码默认 `detect123456`，生产须经 `JWT_KS_PASSWORD`/`JWT_KEY_PASSWORD` 环境变量覆盖
+
+---
+
+## 待办
+
+- Step 5：detect-gateway(Nacos 服务发现路由 / 跨域 / 聚合鉴权 / 转发 auth·event)
+- Step 6：detect-event(事件 CRUD / 规则引擎 / 统计 / 导出 / `@Inner` webhook receive)
+- 联调：Python webhook → 入库 → 前端 JWT 查询全链路
