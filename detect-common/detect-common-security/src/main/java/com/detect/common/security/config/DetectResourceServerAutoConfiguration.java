@@ -2,6 +2,7 @@ package com.detect.common.security.config;
 
 import com.detect.common.security.handler.DetectAccessDeniedHandler;
 import com.detect.common.security.handler.DetectAuthenticationEntryPoint;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnWebApplication;
@@ -23,8 +24,14 @@ import org.springframework.web.servlet.mvc.method.annotation.RequestMappingHandl
 @EnableWebSecurity
 public class DetectResourceServerAutoConfiguration {
 
+    /**
+     * 注入主 MVC 的 {@code requestMappingHandlerMapping}(@Inner 控制器注册于此)。
+     * 显式 {@link Qualifier} 是必需的：引入 actuator 后会额外注册 {@code controllerEndpointHandlerMapping}，
+     * 同类型 2 个 bean 会使按类型注入产生歧义导致启动失败。
+     */
     @Bean
-    public PermitAllUrlProperties permitAllUrlProperties(RequestMappingHandlerMapping handlerMapping) {
+    public PermitAllUrlProperties permitAllUrlProperties(
+            @Qualifier("requestMappingHandlerMapping") RequestMappingHandlerMapping handlerMapping) {
         return new PermitAllUrlProperties(handlerMapping);
     }
 

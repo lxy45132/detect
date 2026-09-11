@@ -30,6 +30,7 @@
         <mybatis-plus.version>3.5.5</mybatis-plus.version>
         <minio.version>8.5.7</minio.version>
         <hutool.version>5.8.27</hutool.version>
+        <easyexcel.version>3.3.4</easyexcel.version>
     </properties>
 
     <dependencyManagement>
@@ -67,6 +68,11 @@
                 <artifactId>hutool-all</artifactId>
                 <version>${hutool.version}</version>
             </dependency>
+            <dependency>
+                <groupId>com.alibaba</groupId>
+                <artifactId>easyexcel</artifactId>
+                <version>${easyexcel.version}</version>
+            </dependency>
             <!-- 内部模块 -->
             <dependency><groupId>com.detect</groupId><artifactId>detect-common-core</artifactId><version>${project.version}</version></dependency>
             <dependency><groupId>com.detect</groupId><artifactId>detect-common-mybatis</artifactId><version>${project.version}</version></dependency>
@@ -86,6 +92,15 @@
     <build>
         <pluginManagement>
             <plugins>
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-compiler-plugin</artifactId>
+                    <configuration>
+                        <!-- Spring 6 依赖 -parameters 保留形参名(如 @PathVariable/@Qualifier 按名解析)；
+                             未继承 spring-boot-starter-parent 故须显式开启 -->
+                        <parameters>true</parameters>
+                    </configuration>
+                </plugin>
                 <plugin>
                     <groupId>org.springframework.boot</groupId>
                     <artifactId>spring-boot-maven-plugin</artifactId>
