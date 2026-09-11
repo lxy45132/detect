@@ -1,7 +1,9 @@
 package com.detect.event.service;
 
+import com.detect.common.core.exception.BizException;
 import com.detect.common.oss.OssTemplate;
 import com.detect.event.dto.EventReceiveDTO;
+import com.detect.event.dto.EventRecordUpdateDTO;
 import com.detect.event.entity.CameraManage;
 import com.detect.event.entity.EventRecords;
 import com.detect.event.mapper.CameraManageMapper;
@@ -19,7 +21,9 @@ import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.never;
@@ -136,5 +140,57 @@ class EventRecordServiceTest {
         verify(eventRecordsMapper).insert(cap.capture());
         assertNull(cap.getValue().getSnapUrl());
         assertNull(cap.getValue().getDeviceName());
+    }
+
+    @Test
+    void update_notFound_throws1001() {
+        when(eventRecordsMapper.selectById(anyLong())).thenReturn(null);
+        EventRecordUpdateDTO dto = new EventRecordUpdateDTO();
+        dto.setPlateNum("京A12345");
+
+        BizException ex = assertThrows(BizException.class, () -> service.update(999L, dto));
+
+        assertEquals(1001, ex.getCode());
+        verify(eventRecordsMapper, never()).updateById(any());
+    }
+
+    @Test
+    void update_copiesOnlyNonNullBusinessFields() {
+        EventRecords existing = new EventRecords();
+        existing.setId(1L);
+        when(eventRecordsMapper.selectById(1L)).thenReturn(existing);
+        EventRecordUpdateDTO dto = new EventRecordUpdateDTO();
+        dto.setPlateNum("京A12345");
+        dto.setVehicleColor("蓝色");
+
+        service.update(1L, dto);
+
+        ArgumentCaptor<EventRecords> cap = ArgumentCaptor.forClass(EventRecords.class);
+        verify(eventRecordsMapper).updateById(cap.capture());
+        EventRecords saved = cap.getValue();
+        assertEquals(1L, saved.getId());
+        assertEquals("京A12345", saved.getPlateNum());
+        assertEquals("蓝色", saved.getVehicleColor());
+        assertNull(saved.getVehicleNormalType());
+        assertNull(saved.getHandleStatus());
+    }
+
+    @Test
+    void delete_invokesLogicDeleteById() {
+        service.delete(7L);
+        verify(eventRecordsMapper).deleteById(7L);
+    }
+
+    @Test
+    void batchDelete_returnsAffectedRows() {
+        when(eventRecordsMapper.deleteBatchIds(any())).thenReturn(3);
+        assertEquals(3, service.batchDelete(List.of(1L, 2L, 3L)));
+    }
+
+    @Test
+    void batchDelete_emptyIds_throws400() {
+        BizException ex = assertThrows(BizException.class, () -> service.batchDelete(List.of()));
+        assertEquals(400, ex.getCode());
+        verify(eventRecordsMapper, never()).deleteBatchIds(any());
     }
 }

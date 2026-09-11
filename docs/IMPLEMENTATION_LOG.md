@@ -25,7 +25,7 @@ detect(父 pom)
 ├─ detect-auth                 认证服务器(签发 JWT)
 ├─ detect-gateway              网关(路由/跨域/聚合鉴权)   ✅
 └─ detect-modules
-   └─ detect-event             事件业务(CRUD/规则/统计/导出) 骨架✅(6a)
+   └─ detect-event             事件业务(CRUD/规则/统计/导出) 事件域✅(6b)
 ```
 
 ## 全局约定
@@ -169,7 +169,7 @@ detect(父 pom)
 
 ---
 
-## Step 6b：事件域  🔨 进行中(6b-1 receive 已完成验证；6b-2 查询侧待做)
+## Step 6b：事件域  ✅ 已完成(6b-1 receive + 6b-2 查询/写侧，均运行时端到端验证)
 
 ### 6b-1 receive 写路径(Python 对接关键契约)  ✅ 已完成(4 单测 + 运行时端到端)
 
@@ -191,11 +191,44 @@ detect(父 pom)
 - 运行时(`@Inner 放行 URL: [/event-records/receive]`)：带 `from:Y` 首投→`{code:0,data:{id:1}}`；同 payload 再投→**同 id:1**(幂等，DB total_rows=1)；无 `from` 头→`{code:403,msg:"内部接口禁止外部访问"}`(InnerAspect 拦截)
 - DB 落库核对：device_name=南河湫水闸(camera补全)、snap_time=2026-09-10 08:49:50.123(东八区)、snap_url=…/detect/event/20260911/xxx.jpg(MinIO转存)、status=0/handle_status=0/priority=0、SLAGTRUCK/3/87
 
+### 6b-2 查询侧 + 写侧修正(§4.1.2~§4.1.8，7 端点)  ✅ 已完成(14 单测 + 读写运行时端到端)
+
+**端点**(控制器 `EventRecordController`，除 receive@Inner 外均受资源服务器 `anyRequest().authenticated()` JWT 保护)：
+- `GET /page` 分页(current/size/deviceNum/eventType/task/handleStatus/priority/plateNum 模糊/keyword 车牌 OR 设备名/startTime/endTime)，records 含派生 eventTypeName、task(取自 source_data JSON)、格式化 snapTime
+- `GET /{id}` 详情：全字段 + sourceData 解析为对象 + hitRule{id,ruleName,ruleType} + handleHistory[]
+- `PUT /{id}` 部分修正业务字段(不含 handleStatus，仅传需改字段)；不存在→1001
+- `DELETE /{id}` 逻辑删；`DELETE /batch` body{ids:[]}→{deleted:N}
+- `GET /statistics` {total,byEventType[],byTask[],byDay[]}；`GET /export` format=xlsx/csv(默认 xlsx)，同步上限 5 万条(超限→4001)
+
+**关键文件**：`dto/`(EventQueryDTO/EventRecordUpdateDTO/BatchDeleteDTO) · `vo/`(EventRecordListVO/EventRecordDetailVO/HitRuleVO/HandleHistoryVO/DeletedVO/EventStatVO(record+3 嵌套)/EventExportRow(EasyExcel)) · `service/EventQueryService`(读侧 342 行) · `service/EventRecordService`(写侧扩 update/delete/batchDelete) · `test/`(EventQueryServiceTest 5 + EventRecordServiceTest +5=9)
+
+**关键决策与踩坑**：
+- **CQRS-lite 拆分**：写侧 EventRecordService(receive/update/delete/batchDelete) 与读侧 EventQueryService(page/detail/statistics/export) 分职，控制器注入两者
+- **查询侧统一 QueryWrapper(字符串列名) 而非 Lambda**：需支持 source_data 的 MySQL JSON 函数过滤(`JSON_UNQUOTE(JSON_EXTRACT(source_data,'$.task'))`)与聚合投影(select+groupBy)，Lambda 的 select 仅收 SFunction 不支持原生聚合串
+- **COUNT 防坑**：手工 selectCount 用「仅过滤」wrapper(不含 ORDER BY)——`SELECT COUNT(*) … ORDER BY` 在 ONLY_FULL_GROUP_BY 下非法；分页 selectPage 内置 count 由 MyBatis-Plus 自动剥离 ORDER BY，不受影响
+- **统计聚合**：selectMaps + select 投影 + groupBy，别名用反引号包裹保留字(`COUNT(*) AS \`count\``、`DATE(snap_time) AS \`date\``)；Map key 为列标签(无下划线，不受 mapUnderscoreToCamelCase 影响)
+- **部分更新**：`BeanUtil.copyProperties(dto,entity,CopyOptions.setIgnoreNullValue(true))` + updateById(默认 NOT_NULL 策略)，updateTime 由 MetaObjectHandler 自动留痕
+- **导出先校验后设头**：先 selectCount(仅过滤)>50000 抛 4001，再设 contentType/Content-Disposition(URLEncoder 编码文件名)，最后 EasyExcel.write(response.getOutputStream())；异常时响应未提交，GlobalExceptionHandler 可回 JSON
+- **VO 时间用 String 格式化**：snapTime/handleTime 按 §2.4 `yyyy-MM-dd HH:mm:ss` 输出，避免全局 Jackson 配置；sourceData 用 Object 承载解析后的 Map(解析失败回退原始串)
+
+**🐛 重大踩坑：camera_manage 种子中文双重编码(已修复)**：
+- **现象**：读侧运行时中文显示乱码。**字节级确证**：`HEX(device_name)`=`C3A5C28DE28094…`(å + U+008D + em dash)，应为 `南`=`E58D97` → 原始 UTF-8 被按 latin1(cp1252) 解码后再存 utf8mb4(双重编码)
+- **根因**：Step 6a 执行 `03-event-schema.sql` 时 mysql 客户端连接字符集非 utf8mb4。**关键区分**：HTTP 响应字节检查证明 `eventTypeName 车辆(E8BDA6E8BE86)` 正确(6b-2 Java+Jackson 中文序列化无误)，`deviceName` 双重编码(代码只是忠实透传 DB 损坏值)——**bug 在种子数据，不在 6b-2 代码**
+- **修复**：① `03-event-schema.sql` 加 `SET NAMES utf8mb4;` + camera seed 由 `INSERT IGNORE` 改 `ON DUPLICATE KEY UPDATE`(重跑自愈)；② `docker cp` + `mysql --default-character-set=utf8mb4 < /tmp/03.sql` 重跑；③ `UPDATE event_records e JOIN camera_manage c ON e.device_num=c.device_num SET e.device_name=c.device_name` 同步冗余字段。**验证**：HEX 全部转正确(dev01=E58D97E6B2B3E6B9ABE6B0B4E997B8=南河湫水闸)
+
+**验证结果**：
+- 编译 + 单测：`mvn -pl detect-modules/detect-event clean install` EXIT=0；14 单测全绿(EventQueryServiceTest 5 + EventRecordServiceTest 9)；fat jar 100.52MB
+- 运行时**读侧**(真实 MySQL)：page total=4 按 snap_time DESC；`?task=license_plate`(JSON_EXTRACT 过滤)total=1；`?plateNum=JINGA`(LIKE)total=1；statistics total=4，byEventType/byTask/byDay 三维聚合排序正确；detail sourceData 解析为对象、hitRule=null、handleHistory 空
+- 运行时**写侧**(curl --data-binary @file 规避 PS 引号 bug，DB HEX 确证)：
+  - PUT/2 中文部分更新→code=0，DB `plate_num=京A12345`(HEX E4BAAC413132333435)、`vehicle_color=蓝色`(HEX E8939DE889B2) **单次编码正确**、`vehicle_normal_type=TRUCK` **未变**(部分更新成立)
+  - PUT/999999→**1001**；无 token GET/page→**401**(JWT 保护)
+  - export xlsx→4231B magic `50-4B`(PK/zip)；csv→436B magic `CA-C2-BC`(GBK `事件`，中文 Excel 友好)
+  - DELETE/4→code=0；DELETE/batch[2,3]→deleted=2；page after→total=1(仅 id=1)；DB del_flag：id2/3/4=1、id1=0(逻辑删成立)
+
 ---
 
 ## 待办
 
-- Step 6b-2：事件查询侧(page/detail/update/delete/batch/statistics/export)
 - Step 6c：规则域(CRUD + 引擎 + Redis 队列消费 + Feign 扇出通知 + auth @Inner 列管理员)
 - Step 6d：处理域(状态机流转 + 处理记录留痕)
 - Step 6e：通知(5) + 分类字典(3)

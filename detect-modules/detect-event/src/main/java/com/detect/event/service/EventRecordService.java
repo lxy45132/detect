@@ -1,10 +1,15 @@
 package com.detect.event.service;
 
+import cn.hutool.core.bean.BeanUtil;
+import cn.hutool.core.bean.copier.CopyOptions;
 import cn.hutool.json.JSONObject;
 import cn.hutool.json.JSONUtil;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.detect.common.core.enums.ResultCode;
+import com.detect.common.core.exception.BizException;
 import com.detect.common.oss.OssTemplate;
 import com.detect.event.dto.EventReceiveDTO;
+import com.detect.event.dto.EventRecordUpdateDTO;
 import com.detect.event.entity.CameraManage;
 import com.detect.event.entity.EventRecords;
 import com.detect.event.enums.HandleStatusEnum;
@@ -18,11 +23,13 @@ import org.springframework.stereotype.Service;
 import java.time.LocalDateTime;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
+import java.util.Collection;
 import java.util.List;
 import java.util.Objects;
 
 /**
- * 事件记录服务。当前实现 receive 写路径(接口文档 §4.1.1)；查询侧(page/detail/统计/导出)在 6b-2 追加。
+ * 事件记录写侧服务：receive(§4.1.1) / update(§4.1.4) / delete(§4.1.5) / batchDelete(§4.1.6)。
+ * 查询侧(page/detail/statistics/export)见 {@link EventQueryService}。
  */
 @Slf4j
 @Service
@@ -92,6 +99,48 @@ public class EventRecordService {
 
         // TODO(6c)：入库后 LPUSH eventId 到 Redis 轻量队列，异步触发布控规则匹配(不阻塞 webhook)
         return entity.getId();
+    }
+
+    /**
+     * 修正事件业务字段(§4.1.4)。仅传需改字段，按非空增量更新；<b>不含 handleStatus</b>(状态流转走 §4.3)。
+     * update_time 由 MetaObjectHandler 自动填充留痕。
+     *
+     * @throws BizException 1001 事件不存在(或已逻辑删除)
+     */
+    public void update(Long id, EventRecordUpdateDTO dto) {
+        if (eventRecordsMapper.selectById(id) == null) {
+            throw new BizException(ResultCode.EVENT_NOT_FOUND);
+        }
+        EventRecords upd = new EventRecords();
+        upd.setId(id);
+        // 仅拷贝 dto 中非空字段；EventRecords 的 updateById 默认 NOT_NULL 策略再次确保 null 字段不进 SET
+        BeanUtil.copyProperties(dto, upd, CopyOptions.create().setIgnoreNullValue(true));
+        eventRecordsMapper.updateById(upd);
+        log.info("[update] 事件字段修正 id={}", id);
+    }
+
+    /**
+     * 逻辑删除单条(§4.1.5)。@TableLogic 使 deleteById 转为 {@code UPDATE ... SET del_flag=1}，不物理删。
+     * 幂等：对不存在/已删的 id 亦返回成功(受影响 0 行)。
+     */
+    public void delete(Long id) {
+        eventRecordsMapper.deleteById(id);
+        log.info("[delete] 事件逻辑删除 id={}", id);
+    }
+
+    /**
+     * 批量逻辑删除(§4.1.6)。
+     *
+     * @return 实际置删的行数(已删/不存在的 id 不计入)
+     * @throws BizException 400 ids 为空
+     */
+    public int batchDelete(Collection<Long> ids) {
+        if (ids == null || ids.isEmpty()) {
+            throw new BizException(ResultCode.BAD_REQUEST, "ids 不能为空");
+        }
+        int deleted = eventRecordsMapper.deleteBatchIds(ids);
+        log.info("[batchDelete] 批量逻辑删除 {} 条(请求 {} 个 id)", deleted, ids.size());
+        return deleted;
     }
 
     /** ISO8601 带偏移时间归一化到东八区 LocalDateTime(对齐 §2.4 与 DATETIME(3) 列)。 */

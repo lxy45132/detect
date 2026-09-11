@@ -3,6 +3,9 @@
 -- 说明：均可重复执行（IF NOT EXISTS + INSERT IGNORE）。
 USE detect_event;
 
+-- 确保客户端以 utf8mb4 解释本文件字节；否则中文种子会被按 latin1(cp1252) 二次编码存入(踩坑修复)。
+SET NAMES utf8mb4;
+
 -- ----------------------------------------------------------------------
 -- §3.2 event_records 事件主表（Python 推送 + 本设计预警扩展）
 -- ----------------------------------------------------------------------
@@ -122,9 +125,11 @@ CREATE TABLE IF NOT EXISTS `camera_manage` (
   UNIQUE KEY `uk_device_num` (`device_num`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='摄像头设备(最小版)';
 
--- camera_manage 样例设备（幂等）；device_num 与接口文档示例(dev01)一致，联调时可对齐 Python 实际 device_id。
-INSERT IGNORE INTO `camera_manage` (`device_num`, `device_name`, `location`, `status`, `create_time`, `update_time`, `del_flag`) VALUES
+-- camera_manage 样例设备（幂等自愈）；device_num 与接口文档示例(dev01)一致，联调时可对齐 Python 实际 device_id。
+-- 用 ON DUPLICATE KEY UPDATE 而非 INSERT IGNORE：使重跑本脚本能修正历史编码损坏的 device_name/location。
+INSERT INTO `camera_manage` (`device_num`, `device_name`, `location`, `status`, `create_time`, `update_time`, `del_flag`) VALUES
   ('dev01', '南河湫水闸',   '南河湫水闸东岸',   1, NOW(), NOW(), '0'),
   ('dev02', '城北出城卡口', '城北出城卡口',     1, NOW(), NOW(), '0'),
-  ('dev03', '港区集装箱堆场', '港区集装箱堆场', 1, NOW(), NOW(), '0');
+  ('dev03', '港区集装箱堆场', '港区集装箱堆场', 1, NOW(), NOW(), '0')
+ON DUPLICATE KEY UPDATE `device_name`=VALUES(`device_name`), `location`=VALUES(`location`), `status`=VALUES(`status`), `update_time`=NOW();
 
