@@ -169,9 +169,33 @@ detect(父 pom)
 
 ---
 
+## Step 6b：事件域  🔨 进行中(6b-1 receive 已完成验证；6b-2 查询侧待做)
+
+### 6b-1 receive 写路径(Python 对接关键契约)  ✅ 已完成(4 单测 + 运行时端到端)
+
+**契约核对**(读 `api/schema.py` make_record + `api/emitter.py` _post)：
+- DTO `EventReceiveDTO` 字段严格对齐 make_record 输出的 22 个 camelCase 字段
+- `snapTime` 为 ISO8601 带偏移(如 `...T08:49:50.123+08:00`)→ 归一化东八区 LocalDateTime 存 DATETIME(3)
+- `snapImage` **可选**：Python 编码失败会传 null，强校验会致其无限重试+落盘 spool，故不 @NotBlank
+- emitter 据 HTTP 2xx **且** body `code==0` 判成功；幂等命中也返回 code=0
+
+**关键文件**：`dto/EventReceiveDTO`(仅 deviceNum/eventType/snapTime/sourceData 硬必填) / `vo/IdVO`(record) / `service/EventRecordService.receive` / `controller/EventRecordController`(`@Inner POST /event-records/receive`) / `test/EventRecordServiceTest`
+
+**关键决策与踩坑**：
+- **幂等键含 trackId**：同 device+同 snapTime 可能是同一帧多目标(trackId 不同)，仅用 device+snapTime 会误判；故去重键 = device_num + snap_time + source_data.trackId(trackId 在 JSON 内，先按前两列索引收窄再 Java 侧比对)。people_gathering 无 trackId 则以 null 参与比对
+- **幂等短路**：命中重复直接返回已存在 id，**不重复转存 MinIO、不 insert**
+- **派生字段以 Java 为准**：deviceName 查 camera_manage 覆盖入参、status 固定 0、handleStatus/priority 取默认(§5.3)
+
+**验证结果**：
+- 编译 + 单测：`mvn -pl detect-modules/detect-event clean install` EXIT=0；EventRecordServiceTest 4/4 绿
+- 运行时(`@Inner 放行 URL: [/event-records/receive]`)：带 `from:Y` 首投→`{code:0,data:{id:1}}`；同 payload 再投→**同 id:1**(幂等，DB total_rows=1)；无 `from` 头→`{code:403,msg:"内部接口禁止外部访问"}`(InnerAspect 拦截)
+- DB 落库核对：device_name=南河湫水闸(camera补全)、snap_time=2026-09-10 08:49:50.123(东八区)、snap_url=…/detect/event/20260911/xxx.jpg(MinIO转存)、status=0/handle_status=0/priority=0、SLAGTRUCK/3/87
+
+---
+
 ## 待办
 
-- Step 6b：事件域(receive@Inner + page/detail/update/delete/batch/statistics/export)
+- Step 6b-2：事件查询侧(page/detail/update/delete/batch/statistics/export)
 - Step 6c：规则域(CRUD + 引擎 + Redis 队列消费 + Feign 扇出通知 + auth @Inner 列管理员)
 - Step 6d：处理域(状态机流转 + 处理记录留痕)
 - Step 6e：通知(5) + 分类字典(3)
