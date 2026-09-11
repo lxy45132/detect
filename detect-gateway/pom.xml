@@ -2,4 +2,42 @@
     <modelVersion>4.0.0</modelVersion>
     <parent><groupId>com.detect</groupId><artifactId>detect</artifactId><version>1.0.0</version></parent>
     <artifactId>detect-gateway</artifactId>
+
+    <dependencies>
+        <!-- 复用 CommonConstants(from 头契约) 与 R；common-core 仅依赖 spring-web(非 webmvc)，不污染响应式网关 -->
+        <dependency>
+            <groupId>com.detect</groupId>
+            <artifactId>detect-common-core</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.cloud</groupId>
+            <artifactId>spring-cloud-starter-gateway</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.alibaba.cloud</groupId>
+            <artifactId>spring-cloud-starter-alibaba-nacos-discovery</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.cloud</groupId>
+            <artifactId>spring-cloud-starter-loadbalancer</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-actuator</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-maven-plugin</artifactId>
+            </plugin>
+        </plugins>
+    </build>
 </project>

@@ -1,0 +1,44 @@
+server:
+  port: 9999
+
+spring:
+  application:
+    name: detect-gateway
+  cloud:
+    nacos:
+      discovery:
+        server-addr: ${NACOS_HOST:localhost}:${NACOS_PORT:8848}
+    gateway:
+      # 用显式路由，不按服务名自动生成路由
+      discovery:
+        locator:
+          enabled: false
+      routes:
+        # 前端登录：GET/POST /auth/oauth/token -> detect-auth /oauth/token
+        - id: detect-auth
+          uri: lb://detect-auth
+          predicates:
+            - Path=/auth/**
+          filters:
+            - StripPrefix=1
+        # 前端业务：/admin/event/event-records/page -> detect-event /event-records/page
+        - id: detect-event
+          uri: lb://detect-event
+          predicates:
+            - Path=/admin/event/**
+          filters:
+            - StripPrefix=2
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,gateway
+  endpoint:
+    gateway:
+      enabled: true
+
+logging:
+  level:
+    com.detect: debug
+    org.springframework.cloud.gateway: info

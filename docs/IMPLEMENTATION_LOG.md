@@ -9,7 +9,7 @@
 - **架构**：pig 风格 Spring Cloud 多模块微服务
 - **版本矩阵**：JDK 17 / Spring Boot 3.2.4 / Spring Cloud 2023.0.1 / Spring Cloud Alibaba 2023.0.1.0 / Nacos Server 2.3.2 / MyBatis-Plus 3.5.5(`mybatis-plus-spring-boot3-starter`) / MinIO 8.5.7 / Hutool 5.8.27
 - **坐标**：groupId `com.detect`，version `1.0.0`
-- **端口规划**：gateway 8080 / auth 8081 / event 8082
+- **端口规划**：gateway 9999 / auth 8081 / event 8082（原计划网关 8080，因本机 VMware `vmnat` 服务常驻占用 8080，改用 pig 风格 9999）
 - **基础设施(docker-compose)**：MySQL 3307(root/root) / Nacos 8848,9848 / Redis 6379 / MinIO 9000,9001(minioadmin/minioadmin)
 - **本地环境**：Maven 仓库 `D:\apachemaven\apache-maven-3.9.14\mvn-repo`；JDK `C:\Users\HP\JDK\jdk-17.0.18.8-hotspot`
 
@@ -98,8 +98,39 @@ detect(父 pom)
 
 ---
 
+## Step 5：detect-gateway 网关  ✅ 已完成(编译 + 2 单测 + 运行时路由/CORS 全绿)
+
+### 架构决策(经用户确认)
+
+1. **轻量透传**：网关只做 路由 + CORS + 剥离外部 from 头；JWT 验签下沉到 detect-event(复用 common-security)，网关不依赖 jose
+2. **Nacos 动态路由**：`lb://detect-auth`、`lb://detect-event`；auth/event 均注册 Nacos(给 auth 回填了 nacos-discovery)
+3. **Python 直连 event**：webhook 不经网关；网关剥离外部 `from` 头，杜绝伪造 @Inner
+
+### 关键文件
+
+- `GatewayApplication`(响应式 Spring Cloud Gateway)
+- `filter/RemoveFromHeaderGlobalFilter`(GlobalFilter，HIGHEST_PRECEDENCE，剥离 from 头防伪造 @Inner)
+- `config/GatewayCorsConfig`(响应式 CorsWebFilter，allowedOriginPattern=* + allowCredentials)
+- `application.yml`(端口 **9999** / Nacos discovery / 路由 auth+event / actuator)
+- 路由：`/auth/**` → StripPrefix=1 → lb://detect-auth；`/admin/event/**` → StripPrefix=2 → lb://detect-event
+
+### 关键决策与踩坑
+
+- **响应式隔离**：common-core 仅依赖 spring-web(非 webmvc)、servlet-api 为 provided、CoreAutoConfiguration 为 `@ConditionalOnWebApplication(SERVLET)`，故网关复用 common-core(拿 CommonConstants.FROM 契约)不会引入 DispatcherServlet 而启动失败
+- **端口冲突**：本机 VMware `vmnat` 服务常驻占用 8080，网关改用 pig 风格 9999
+- **Nacos 注册 IP**：Windows 注册为 link-local `169.254.146.191`，本机可达、路由正常；若跨机不可达需 `spring.cloud.inetutils.preferred-networks` 或 `discovery.ip` 固定
+
+### 验证结果
+
+- **编译 + 单测**：`mvn -pl detect-gateway,detect-auth -am clean install` EXIT=0；RemoveFromHeaderGlobalFilterTest 2 单测全绿；fat jar gateway 48.87MB / auth 45.78MB(含 nacos)
+- **运行时**(auth+gateway 双起，均注册 Nacos healthy)：
+  - `POST 网关:9999/auth/oauth/token`(admin/123456) → HTTP 200 + 合法 JWT(lb://detect-auth 解析 + StripPrefix=1 生效)
+  - Nacos 实例列表：detect-auth 1 健康实例(169.254.146.191:8081)
+  - CORS 预检 OPTIONS(Origin http://localhost:3000) → 200 + Allow-Origin 回显 + Allow-Credentials true + Max-Age 3600
+
+---
+
 ## 待办
 
-- Step 5：detect-gateway(Nacos 服务发现路由 / 跨域 / 聚合鉴权 / 转发 auth·event)
 - Step 6：detect-event(事件 CRUD / 规则引擎 / 统计 / 导出 / `@Inner` webhook receive)
 - 联调：Python webhook → 入库 → 前端 JWT 查询全链路
