@@ -6,4 +6,87 @@
         <version>1.0.0</version>
     </parent>
     <artifactId>detect-event</artifactId>
+    <description>事件管理后台 - 事件/规则/处理/通知/字典</description>
+
+    <dependencies>
+        <!-- 内部公共模块 -->
+        <dependency>
+            <groupId>com.detect</groupId>
+            <artifactId>detect-common-core</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.detect</groupId>
+            <artifactId>detect-common-mybatis</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.detect</groupId>
+            <artifactId>detect-common-security</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.detect</groupId>
+            <artifactId>detect-common-oss</artifactId>
+        </dependency>
+
+        <!-- Servlet Web(webmvc + tomcat + jackson) -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-web</artifactId>
+        </dependency>
+
+        <!-- 服务注册发现 -->
+        <dependency>
+            <groupId>com.alibaba.cloud</groupId>
+            <artifactId>spring-cloud-starter-alibaba-nacos-discovery</artifactId>
+        </dependency>
+
+        <!-- Redis 轻量队列(异步规则匹配) -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-data-redis</artifactId>
+        </dependency>
+
+        <!-- OpenFeign 扇出通知(调用 auth 列管理员) + 负载均衡 -->
+        <dependency>
+            <groupId>org.springframework.cloud</groupId>
+            <artifactId>spring-cloud-starter-openfeign</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.cloud</groupId>
+            <artifactId>spring-cloud-starter-loadbalancer</artifactId>
+        </dependency>
+
+        <!-- hutool(JSON 解析/工具)：common-core 中为 optional 不传递，此处显式引入 -->
+        <dependency>
+            <groupId>cn.hutool</groupId>
+            <artifactId>hutool-all</artifactId>
+        </dependency>
+
+        <!-- EasyExcel 导出 -->
+        <dependency>
+            <groupId>com.alibaba</groupId>
+            <artifactId>easyexcel</artifactId>
+        </dependency>
+
+        <!-- 监控端点 -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-actuator</artifactId>
+        </dependency>
+
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <finalName>detect-event</finalName>
+        <plugins>
+            <plugin>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-maven-plugin</artifactId>
+            </plugin>
+        </plugins>
+    </build>
 </project>

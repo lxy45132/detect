@@ -23,9 +23,9 @@ detect(父 pom)
 │  ├─ detect-common-security   资源服务器 JWT 验签/SecurityUtils/@Inner 放行
 │  └─ detect-common-oss        MinIO 对象存储封装
 ├─ detect-auth                 认证服务器(签发 JWT)
-├─ detect-gateway              网关(路由/跨域/聚合鉴权)   [待建]
+├─ detect-gateway              网关(路由/跨域/聚合鉴权)   ✅
 └─ detect-modules
-   └─ detect-event             事件业务(CRUD/规则/统计/导出) [待建]
+   └─ detect-event             事件业务(CRUD/规则/统计/导出) 骨架✅(6a)
 ```
 
 ## 全局约定
@@ -130,7 +130,49 @@ detect(父 pom)
 
 ---
 
+## Step 6a：detect-event 骨架  ✅ 已完成(编译 + fat jar + 启动注册 Nacos + 连库连 Redis)
+
+### 架构决策(经用户确认)
+
+1. **异步规则匹配 = Redis 轻量队列**：receive 入库后 `LPUSH` eventId，后台 `BRPOP` 消费触发规则匹配(6c 实现)，不阻塞 webhook
+2. **通知扇出 = OpenFeign 调 auth 列管理员**：规则命中后经 Feign 取全部 ADMIN 用户，逐个写 `sys_notification`(6c 实现)
+3. **camera_manage = 最小版 + seed**：文档 §3.2 引用但未给结构，建 `id/device_num(唯一)/device_name/location/status` + BaseEntity 三件套，seed `dev01~dev03`
+
+### 关键文件
+
+- `pom.xml`：4 个 common + web + nacos-discovery + data-redis + openfeign + loadbalancer + hutool + easyexcel + actuator + test；`finalName=detect-event`
+- `EventApplication`(`@SpringBootApplication` + `@MapperScan("com.detect.event.mapper")` + `@EnableFeignClients`)
+- `application.yml`(端口 8082 / Nacos / detect_event 库 / Redis / 资源服务器 `jwk-set-uri=http://localhost:8081/oauth2/jwks` / MinIO `detect.oss`)
+- `sql/init/03-event-schema.sql`(5 表 + camera seed，幂等 `IF NOT EXISTS`/`INSERT IGNORE`)
+- 5 实体：`EventRecords`/`AlertRule`/`CameraManage`(extends BaseEntity) + `AlertHandleRecord`/`SysNotification`(无 del_flag，不继承)
+- 5 Mapper：均 extends `BaseMapper`
+- 5 枚举：`EventTypeEnum`/`TaskTypeEnum`/`HandleStatusEnum`/`PriorityEnum`/`RuleTypeEnum`(带 `nameOf`/`isValid` 静态查名)
+
+### 关键决策与踩坑
+
+- **实体继承边界**：`alert_handle_record`/`sys_notification` 无 del_flag，若继承 BaseEntity 则 `@TableLogic` 会引用不存在的列 → 二者不继承；`SysNotification` 自带 `createTime` 加 `@TableField(fill=INSERT)` 复用公共 MetaObjectHandler
+- **JSON 列以 String 承载**：`source_data`/`match_config`/`device_scope`/`time_scope` 存字符串，服务层用 hutool/Jackson 解析，规避 TypeHandler 复杂度
+- **传递依赖陷阱**：common-core 的 hutool 为 `optional`、common-security 的 webmvc/jackson 为 `provided`(均不传递) → event 须显式加 web + hutool
+- **平台级修复(common-security)**：`PermitAllUrlProperties` 原按类型注入 `RequestMappingHandlerMapping`，event 引入 actuator 后出现第 2 个 `controllerEndpointHandlerMapping` → 同类型 2 bean 歧义启动失败。修复：`@Qualifier("requestMappingHandlerMapping")` 锁定主 MVC 映射(@Inner 控制器注册于此)。auth(无 actuator)/gateway(响应式)不受影响，event 是首个带 actuator 的 Servlet 服务
+- **父 pom 开启 `-parameters`**：未继承 spring-boot-starter-parent，显式为 maven-compiler-plugin 配 `<parameters>true</parameters>`，保障 Spring 6 按形参名解析(@PathVariable/@Qualifier)
+
+### 验证结果
+
+- **编译**：`mvn -pl detect-modules/detect-event -am clean install -DskipTests` EXIT=0；fat jar 100.47MB(含 easyexcel+POI)
+- **建表**：`docker cp` + 容器内 `mysql < 03-event-schema.sql` EXIT=0；5 表建成，camera_manage seed dev01~dev03
+- **运行时**(java -jar 启动，10.456s)：
+  - `Tomcat started on port 8082`；`Started EventApplication`
+  - Nacos 注册 `detect-event 169.254.146.191:8082 healthy=true`
+  - `PermitAllUrlProperties: @Inner 放行 URL: []`(资源服务器自动配置生效，6a 暂无 @Inner 端点)
+  - `GET /actuator/health` → `{"status":"UP"}`(聚合含 db/redis/discovery)
+  - `HikariPool-1 - Start completed` + `Added connection com.mysql.cj.jdbc.ConnectionImpl` → detect_event 连通
+
+---
+
 ## 待办
 
-- Step 6：detect-event(事件 CRUD / 规则引擎 / 统计 / 导出 / `@Inner` webhook receive)
+- Step 6b：事件域(receive@Inner + page/detail/update/delete/batch/statistics/export)
+- Step 6c：规则域(CRUD + 引擎 + Redis 队列消费 + Feign 扇出通知 + auth @Inner 列管理员)
+- Step 6d：处理域(状态机流转 + 处理记录留痕)
+- Step 6e：通知(5) + 分类字典(3)
 - 联调：Python webhook → 入库 → 前端 JWT 查询全链路
