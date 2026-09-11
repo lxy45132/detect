@@ -1,0 +1,29 @@
+server:
+  port: 8081
+
+spring:
+  application:
+    name: detect-auth
+  datasource:
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    url: jdbc:mysql://${MYSQL_HOST:localhost}:${MYSQL_PORT:3307}/detect_auth?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true
+    username: ${MYSQL_USER:root}
+    password: ${MYSQL_PASSWORD:root}
+
+mybatis-plus:
+  configuration:
+    map-underscore-to-camel-case: true
+
+detect:
+  auth:
+    jwt:
+      key-store: classpath:jwt.jks
+      key-store-password: ${JWT_KS_PASSWORD:detect123456}
+      key-alias: detect-jwt
+      key-password: ${JWT_KEY_PASSWORD:detect123456}
+      issuer: http://localhost:8081
+      expire-seconds: 7200
+
+logging:
+  level:
+    com.detect: debug
