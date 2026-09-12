@@ -25,7 +25,7 @@ detect(父 pom)
 ├─ detect-auth                 认证服务器(签发 JWT)
 ├─ detect-gateway              网关(路由/跨域/聚合鉴权)   ✅
 └─ detect-modules
-   └─ detect-event             事件业务(CRUD/规则/统计/导出) 事件域✅(6b)
+   └─ detect-event             事件业务(CRUD/规则/统计/导出) 事件域✅(6b) 规则域🚧(6c-1✅)
 ```
 
 ## 全局约定
@@ -227,9 +227,48 @@ detect(父 pom)
 
 ---
 
+## Step 6c：规则域  🚧 进行中(拆 6c-1 CRUD+引擎+试跑 / 6c-2 异步队列消费 / 6c-3 通知扇出)
+
+### 6c-1 布控规则 CRUD + 匹配引擎 + 试跑(§4.2.1~§4.2.7，7 端点)  ✅ 已完成(27 单测 + 15 步运行时端到端 + 中文 HEX 确证)
+
+**端点**(控制器 `AlertRuleController`，均受资源服务器 `anyRequest().authenticated()` JWT 保护)：
+- `GET /alert-rules/page` 分页(current/size/ruleType/enabled/keyword 规则名模糊)，records 含派生 ruleTypeName、matchConfig 解析为对象
+- `GET /alert-rules/{id}` 详情：全字段 + deviceScope/timeScope/matchConfig 解析为对象 + 格式化 createTime/updateTime；不存在→2002
+- `POST /alert-rules` 新建：ruleName(必)/ruleType(必,isValid)/matchConfig(必,按 ruleType 校验结构)，默认 priority=1(IMPORTANT)/notifyEnabled=1/enabled=1；响应{id}；配置非法→2001
+- `PUT /alert-rules/{id}` 部分更新：仅传需改字段；ruleName 传空串→400；按「生效后 ruleType+matchConfig」组合重校验(防只改其一漏检)
+- `DELETE /alert-rules/{id}` 逻辑删(幂等)
+- `PUT /alert-rules/{id}/toggle` body{enabled:0|1}；非 0/1→400
+- `POST /alert-rules/match-test` body{ruleId,sampleEvent{...}}；响应{matched,reason}(§4.2.7，示例 reason=`crowdNum 12 命中阈值 >10`)；**不落库**(试跑用)
+
+**关键文件**：
+- 引擎：`service/RuleMatchInput`(record，归一化事件源，含 `from(EventRecords)` 供 6c-2 复用) · `service/MatchResult`(record，形状即 §4.2.7 响应{matched,reason}，hit/miss 工厂) · `service/RuleMatcher`(@Component 纯函数 204 行，门控 event_type→device_scope→time_scope(支持跨零点)→按 rule_type 核心匹配)
+- DTO：`AlertRuleQueryDTO`/`AlertRuleSaveDTO`(matchConfig/deviceScope/timeScope 用 Object 承载)/`ToggleDTO`/`MatchTestDTO`(嵌套 SampleEvent)
+- VO：`AlertRuleListVO`/`AlertRuleDetailVO`
+- 服务：`service/AlertRuleService`(338 行) · 控制器：`controller/AlertRuleController`(7 端点)
+- 测试：`test/RuleMatcherTest`(12) · `test/AlertRuleServiceTest`(15)
+
+**关键决策与踩坑**：
+- **匹配引擎纯函数化**：RuleMatcher 不校验 enabled(停用规则仍可试跑)、无副作用；match-test 与 6c-2 队列消费者复用同一引擎("所配即所判")
+- **门控顺序**：event_type(大类) → device_scope(生效设备) → time_scope(生效时段，start>end 视为跨零点 `!t.isBefore(start)||!t.isAfter(end)`) → 按 rule_type 核心匹配；任一门控不符即短路 miss 并给出可读 reason
+- **CROWD_THRESHOLD 表达式**：正则 `^\s*(>=|<=|==|>|<|=)\s*(-?\d+)\s*$` 解析 op+threshold，switch 比较；试跑 reason 与 §4.2.7 示例逐字对齐(`crowdNum 12 命中阈值 >10`)
+- **🐛 hutool `parseObj(Object)` String 陷阱(设计规避)**：`JSONUtil.parseObj(o)` 当 o 运行时是 String 会走 parseObj(Object) 把 String 当 bean(错误)。`AlertRuleService.asJsonObject` 规范化：CharSequence→toString→parseObj(String)；Map/bean→toJsonStr→parseObj(String)，顺带保证嵌套 List→JSONArray。校验(validateMatchConfig)与读取(parseJson)统一走此路径
+- **JSON 列以 String 承载**：match_config/device_scope/time_scope 存 String；出参 parseJson 解析为对象直出(JSONObject 实现 Map、JSONArray 实现 List，Jackson 直出)；`[`开头→parseArray 否则 parseObj，异常回退原串
+- **校验全在服务层**：不依赖 bean-validation 运行时是否生效；ruleType 非法→2001、matchConfig 结构与 ruleType 不符→2001(PLATE_BLACKLIST/VEHICLE_TYPE/DEVICE_TIME 须非空数组，CROWD_THRESHOLD 须合法表达式)、ruleName 缺失/空串→400
+
+**验证结果**：
+- 编译 + 单测：`mvn -pl detect-modules/detect-event test` BUILD SUCCESS；41 单测全绿(RuleMatcher 12 + AlertRuleService 15 + EventQuery 5 + EventRecord 9)；fat jar 100.55MB
+- 运行时(15 步冒烟，真实 MySQL + auth JWT)：
+  - 建 CROWD_THRESHOLD/PLATE_BLACKLIST 规则→code=0 id=1/2；建配置非法规则(PLATE_BLACKLIST+crowdNum config)→**2001**
+  - page total=2；detail rid1 **JSON 列往返**：matchConfig.crowdNum=`>10`、timeScope.start=`08:00`(存 String 出对象)
+  - match-test：crowdNum=12→**matched=True**、crowdNum=5→matched=False、eventType 门控(规则限 300 样本 200,crowd=99)→matched=False
+  - toggle off→detail enabled=0；update rename→code=0；无 token page→**401**；detail 999999→**2002**；delete rid2→code=0；page after→total=1(逻辑删)
+- **中文 HEX 确证**(对比 6b-2 camera_manage 双重编码教训)：id=1 rule_name=`人群聚集预警(已改名)` HEX=`E4BABA·E7BEA4·E8819A·E99B86·E9A284·E8ADA6·28·E5B7B2·E694B9·E5908D·29`(每汉字 3 字节 UTF-8，`(`/`)`=ASCII 28/29，**无双重编码 C3A4…**)；id=2 `车牌黑名单布控` del_flag=1。alert_rule HTTP 写入路径中文单次编码正确
+
+---
+
 ## 待办
 
-- Step 6c：规则域(CRUD + 引擎 + Redis 队列消费 + Feign 扇出通知 + auth @Inner 列管理员)
+- Step 6c：规则域 —— 6c-1(CRUD+引擎+试跑)✅ / 6c-2(receive LPUSH eventId + BRPOP 消费者 + 命中落库 hit_rule_id/priority/status) / 6c-3(Feign→auth @Inner 列管理员 → 写 sys_notification)
 - Step 6d：处理域(状态机流转 + 处理记录留痕)
 - Step 6e：通知(5) + 分类字典(3)
 - 联调：Python webhook → 入库 → 前端 JWT 查询全链路
