@@ -43,6 +43,8 @@ class AlertMatchServiceTest {
     private AlertHandleRecordMapper alertHandleRecordMapper;
     @Spy
     private RuleMatcher ruleMatcher = new RuleMatcher();
+    @Mock
+    private NotificationService notificationService;
 
     @InjectMocks
     private AlertMatchService service;
@@ -127,6 +129,9 @@ class AlertMatchServiceTest {
         assertNotNull(rec.getHandleTime());
         assertTrue(rec.getHandleRemark().startsWith("规则命中："));
         assertTrue(rec.getHandleRemark().contains("crowdNum 12 命中阈值 >10"));
+
+        // notify_enabled=1 → 触发扇出通知(6c-3)
+        verify(notificationService).notifyRuleHit(any(), any(), any());
     }
 
     @Test

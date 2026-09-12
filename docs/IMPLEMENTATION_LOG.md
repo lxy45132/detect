@@ -25,7 +25,7 @@ detect(父 pom)
 ├─ detect-auth                 认证服务器(签发 JWT)
 ├─ detect-gateway              网关(路由/跨域/聚合鉴权)   ✅
 └─ detect-modules
-   └─ detect-event             事件业务(CRUD/规则/统计/导出) 事件域✅(6b) 规则域🚧(6c-1✅ 6c-2✅)
+   └─ detect-event             事件业务(CRUD/规则/统计/导出) 事件域✅(6b) 规则域✅(6c-1✅ 6c-2✅ 6c-3✅)
 ```
 
 ## 全局约定
@@ -227,7 +227,7 @@ detect(父 pom)
 
 ---
 
-## Step 6c：规则域  🚧 进行中(拆 6c-1 CRUD+引擎+试跑 / 6c-2 异步队列消费 / 6c-3 通知扇出)
+## Step 6c：规则域  ✅ 已完成(拆 6c-1 CRUD+引擎+试跑 / 6c-2 异步队列消费 / 6c-3 通知扇出)
 
 ### 6c-1 布控规则 CRUD + 匹配引擎 + 试跑(§4.2.1~§4.2.7，7 端点)  ✅ 已完成(27 单测 + 15 步运行时端到端 + 中文 HEX 确证)
 
@@ -297,11 +297,40 @@ detect(父 pom)
   - 6c-3 钩子日志：`[match] 规则 1 notify_enabled=1，事件 5 待 6c-3 扇出通知`
 - **中文 HEX 确证**：handler_name=`系统` HEX=`E7B3BB·E7BB9F`(单次编码)；handle_remark 中文规则名 + reason 经 docker mysql utf8mb4 正确回显(控制台乱码仅 Windows codepage 显示假象，DB 字节正确)
 
+### 6c-3 预警通知扇出(Feign→auth @Inner 列管理员 → sys_notification + status 置已推送 §5.3/§4.4)  ✅ 已完成(auth 2 + event 5 单测 + 运行时端到端 + 中文 HEX 确证)
+
+**机制**(§5.3「notify_enabled=1 → 扇出站内通知」+ §4.4 通知域)：
+- 6c-2 命中落库后，若规则 `notify_enabled=1` → `NotificationService.notifyRuleHit(record, rule, result)`
+- Feign 调 auth `@Inner GET /inner/users/admins`(role=ADMIN 且 enabled=1，id ASC) 取管理员列表
+- 每个管理员写一条 `sys_notification`(user_id / title=规则名 / content=设备标识+命中原因 / type=alert / biz_id=eventId / priority=规则priority / read_flag=0，create_time 自动填充)
+- ≥1 条写入后 `event_records.status` 0→1(已推送)；无管理员/Feign 失败则不写不置(返 false，**不回滚命中**)
+
+**关键文件**：
+- auth 侧：`vo/AdminUserVO`(record，仅 id/username/nickname，不含 password/role) · `web/InnerUserController`(@Inner 列管理员) · `config/AuthSecurityConfig`(permitAll 加 `/inner/**`) · `test/InnerUserControllerTest`(2)
+- event 侧：`dto/AdminUser`(@Data，Feign 反序列化目标) · `feign/InnerFeignConfig`(RequestInterceptor 补 `from:Y` 头) · `feign/AuthUserClient`(@FeignClient name=detect-auth，configuration=InnerFeignConfig) · `service/NotificationService`(扇出核心) · `AlertMatchService`(注入 NotificationService，替换 6c-2 TODO 钩子为 notifyRuleHit 调用) · `test/NotificationServiceTest`(5)
+
+**关键决策与踩坑**：
+- **@Inner 跨服务鉴权**：event→auth 的 Feign 调用须带 `from:Y` 头过 InnerAspect；采「客户端专属配置」——InnerFeignConfig **刻意不加 @Configuration**(否则被 @ComponentScan 收为全局，污染所有 Feign 客户端)，仅经 `@FeignClient(configuration=...)` 作用于 AuthUserClient
+- **auth 无 common-security**：PermitAllUrlProperties(扫 @Inner 自动加白名单)仅资源服务器(event)有；auth 是认证服务器，其 @Inner 端点须**手动**加进 AuthSecurityConfig 的 permitAll(`/inner/**`)，否则被 `anyRequest().authenticated()` 拦为 401
+- **通知失败不回滚命中**：notifyRuleHit 内部 try-catch，Feign 异常/无管理员均返 false，命中落库(hit_rule_id/priority/系统留痕)不受影响——通知是「尽力而为」旁路，不应因 auth 抖动丢失预警命中
+- **status 语义**：event.status 是「推送状态」(0未推送/1已推送)，仅在 ≥1 条通知成功写入后置 1；与 handle_status(处理状态，属 6d 状态机)正交
+- **content 组装**：`设备名(设备编号)：命中原因`(设备名取 record.deviceName，为空则仅编号)，如「南河湫水闸(dev01)：crowdNum 20 命中阈值 >10」；title=规则名
+- **VO 最小暴露**：AdminUserVO 仅 id/username/nickname，绝不返回 password/role，遵循内部接口最小权限
+
+**验证结果**：
+- 编译 + 单测：`mvn -pl detect-auth,detect-modules/detect-event test` BUILD SUCCESS；**67 单测全绿**(auth 9=新增 InnerUserController 2 + 原 7；event 58=新增 NotificationService 5 + AlertMatchService 补 verify + 原 52)；两模块重打 fat jar 重启(先 Stop-Process 释放 jar 锁)
+- 运行时(真实 auth+event+Redis+MySQL，规则 rid1 CROWD_THRESHOLD `>10` priority=2 notify_enabled=1 timeScope 08:00-20:00)：
+  - **auth @Inner 端点**：`GET /inner/users/admins` 无 from:Y → `{code:403,msg:内部接口禁止外部访问}`(InnerAspect 拦截)；带 `from:Y` → `{code:0,data:[{id:1,username:admin,nickname:超级管理员}]}`(无 password/role)
+  - **完整扇出链路**：`POST /event-records/receive`(crowdNum=20，dev01) → eventId=7 → 4s 后队列 LLEN=0(drain) → event 7 `status` 0→**1**、hit_rule_id=1、priority=2
+  - **异步 + 跨服务确证**(日志)：扇出全在 event `-match-consumer` 线程；auth `[inner] 列管理员 1 个` 于 10:45:18.040(Feign 调用)与 event markPushed 10:45:18.061 时刻吻合
+  - **sys_notification**：1 条 user_id=1 / type=alert / biz_id=7 / priority=2 / read_flag=0 / create_time 自动填充；alert_handle_record event 7 系统留痕 id=2 from_status=NULL/to_status=0/handler_name=`系统`
+- **中文 HEX 确证**：title=`人群聚集预警(已改名)` HEX=`E4BABA·E7BEA4·E8819A·E99B86·E9A284·E8ADA6·28·E5B7B2·E694B9·E5908D·29`(单次编码)；content=`南河湫水闸(dev01)：crowdNum 20 命中阈值 >10` HEX=`E58D97·E6B2B3·E6B9AB·E6B0B4·E997B8·28·6465763031·29·EFBC9A(全角冒号)·63726F77644E756D·20·3230·20·E591BD·E4B8AD·E99888·E580BC·20·3E·3130`(单次编码，全角冒号 EFBC9A 正确)
+
 ---
 
 ## 待办
 
-- Step 6c：规则域 —— 6c-1(CRUD+引擎+试跑)✅ / 6c-2(异步队列 LPUSH/BRPOP + 命中落库 §5.3)✅ / 6c-3(Feign→auth @Inner 列管理员 → 写 sys_notification + status 置已推送)
+- Step 6c：规则域 ✅ —— 6c-1(CRUD+引擎+试跑)✅ / 6c-2(异步队列 LPUSH/BRPOP + 命中落库 §5.3)✅ / 6c-3(Feign→auth @Inner 列管理员 → 写 sys_notification + status 置已推送 §5.3/§4.4)✅
 - Step 6d：处理域(状态机流转 + 处理记录留痕)
 - Step 6e：通知(5) + 分类字典(3)
 - 联调：Python webhook → 入库 → 前端 JWT 查询全链路

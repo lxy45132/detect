@@ -34,6 +34,7 @@ public class AlertMatchService {
     private final AlertRuleMapper alertRuleMapper;
     private final AlertHandleRecordMapper alertHandleRecordMapper;
     private final RuleMatcher ruleMatcher;
+    private final NotificationService notificationService;
 
     /**
      * 匹配单个事件并落库命中。
@@ -103,10 +104,9 @@ public class AlertMatchService {
         log.info("[match] 事件 {} 命中规则 {}({}) priority→{} reason={}",
                 record.getId(), rule.getId(), rule.getRuleName(), rule.getPriority(), result.reason());
 
-        // 3. notify_enabled=1 → 扇出站内通知并置 status=已推送(6c-3)
+        // 3. notify_enabled=1 → 扇出站内通知给管理员并置 status=已推送(§5.3/§4.4)
         if (Integer.valueOf(1).equals(rule.getNotifyEnabled())) {
-            // TODO(6c-3)：Feign 调 auth @Inner 列 ADMIN → 批量写 sys_notification → event_records.status=1
-            log.debug("[match] 规则 {} notify_enabled=1，事件 {} 待 6c-3 扇出通知", rule.getId(), record.getId());
+            notificationService.notifyRuleHit(record, rule, result);
         }
     }
 }

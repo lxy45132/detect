@@ -40,7 +40,7 @@ public class AuthSecurityConfig {
                 .csrf(csrf -> csrf.disable())
                 .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
                 .authorizeHttpRequests(reg -> reg
-                        .requestMatchers("/oauth/token", "/oauth2/jwks", "/actuator/**", "/error").permitAll()
+                        .requestMatchers("/oauth/token", "/oauth2/jwks", "/inner/**", "/actuator/**", "/error").permitAll()
                         .anyRequest().authenticated())
                 .httpBasic(basic -> basic.disable())
                 .formLogin(form -> form.disable());
