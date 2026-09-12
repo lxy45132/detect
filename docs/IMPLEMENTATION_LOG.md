@@ -25,7 +25,7 @@ detect(父 pom)
 ├─ detect-auth                 认证服务器(签发 JWT)
 ├─ detect-gateway              网关(路由/跨域/聚合鉴权)   ✅
 └─ detect-modules
-   └─ detect-event             事件业务(CRUD/规则/统计/导出) 事件域✅(6b) 规则域🚧(6c-1✅)
+   └─ detect-event             事件业务(CRUD/规则/统计/导出) 事件域✅(6b) 规则域🚧(6c-1✅ 6c-2✅)
 ```
 
 ## 全局约定
@@ -264,11 +264,44 @@ detect(父 pom)
   - toggle off→detail enabled=0；update rename→code=0；无 token page→**401**；detail 999999→**2002**；delete rid2→code=0；page after→total=1(逻辑删)
 - **中文 HEX 确证**(对比 6b-2 camera_manage 双重编码教训)：id=1 rule_name=`人群聚集预警(已改名)` HEX=`E4BABA·E7BEA4·E8819A·E99B86·E9A284·E8ADA6·28·E5B7B2·E694B9·E5908D·29`(每汉字 3 字节 UTF-8，`(`/`)`=ASCII 28/29，**无双重编码 C3A4…**)；id=2 `车牌黑名单布控` del_flag=1。alert_rule HTTP 写入路径中文单次编码正确
 
+### 6c-2 异步规则匹配队列(Redis LPUSH/BRPOP + 命中落库 §5.3)  ✅ 已完成(12 单测 + 运行时端到端 + 中文 HEX 确证)
+
+**机制**(§4.1.1「入库 → 异步触发布控规则匹配」+ §5.3 自动流转)：
+- receive 入库后 `LPUSH detect:event:rule-match:queue eventId`(在 webhook 线程，不阻塞响应)
+- `RuleMatchConsumer` 单守护线程 `BRPOP`(2s 超时)取出 eventId → `AlertMatchService.matchEvent`
+- matchEvent：selectById(@TableLogic，已删/不存在返 null 跳过) → 载全部 enabled=1 规则(id ASC) → RuleMatcher 逐条匹配 → 取最高 priority 命中(平手取小 id) → 落库
+
+**命中落库**(§5.3)：
+- `event_records`：写 `hit_rule_id`=命中规则 id、`priority` 升级=规则 priority(命中后优先级)；`status` 保持 0(未推送)、`handle_status` 保持 0(未处理)——状态流转属 6d，推送属 6c-3
+- `alert_handle_record`：自动生成一条系统留痕(handlerName=`系统`、fromStatus=null、toStatus=0、handleRemark=`规则命中：<规则名>（<reason>）`、handleTime=now)
+- notify_enabled=1 的规则留 6c-3 扇出通知钩子(当前仅 debug 日志占位)
+
+**关键文件**：`queue/RuleMatchQueue`(Redis List 封装 LPUSH/BRPOP，QUEUE_KEY 常量) · `queue/RuleMatchConsumer`(@PostConstruct 起守护线程 + @PreDestroy 优雅停 + 单条异常隔离) · `service/AlertMatchService`(matchEvent + persistHit) · `EventRecordService.receive`(注入 RuleMatchQueue，替换 TODO(6c) 为 push) · `test/RuleMatchQueueTest`(5) · `test/AlertMatchServiceTest`(7) · `EventRecordServiceTest`(+push/幂等不入队 验证)
+
+**关键决策与踩坑**：
+- **at-most-once 轻量队列**：BRPOP 弹出即移除，消费者处理中途宕机则该 eventId 丢失；取舍依据——规格仅要求「异步、不阻塞 webhook」，事件量低可接受(如需 at-least-once 须 BRPOPLPUSH 到「处理中」列表 + ack 回删，本期不做)
+- **无读写竞态**：receive 无环绕事务，insert 自动提交后才 LPUSH，消费者 selectById 必见已落库行
+- **多命中取舍**：规格未定，采「最高 priority，平手取小 id」——规则按 id ASC 载入 + 严格 `>` 比较，天然保留先到的最小 id，结果确定
+- **priority 语义**：event.priority = 命中规则的 alert_rule.priority(「命中后优先级」)；事件默认 0，命中即升级
+- **fromStatus=null**：系统留痕是「命中」审计注记而非人工状态流转(0→0 无意义)，故 fromStatus 置 null、toStatus=0(§5.3)
+- **消费者线程模型**：单守护线程 BRPOP(2s 超时)循环——超时回到循环顶检查 running 标志，@PreDestroy 置 false + interrupt 即优雅退出；单条异常 catch 后继续下一条，不致命
+- **构造器注入新增依赖须同步测试**：EventRecordService 加 RuleMatchQueue 后，EventRecordServiceTest 须补 `@Mock RuleMatchQueue`(否则 @InjectMocks 构造注入传 null，receive 调 push 时 NPE)
+
+**验证结果**：
+- 编译 + 单测：`mvn -pl detect-modules/detect-event test` BUILD SUCCESS；**53 单测全绿**(新增 RuleMatchQueue 5 + AlertMatchService 7，其余 41 保持)；重打 fat jar 重启(旧 jar 被运行进程锁，先 Stop-Process 释放再 package)
+- 运行时(真实 Redis + MySQL，重启用 rid1 CROWD_THRESHOLD `>10` priority=2 timeScope 08:00-20:00)：
+  - 队列 LLEN：投递前 0 → receive 两条(HIT crowdNum=15 得 eventId=5、MISS crowdNum=5 得 eventId=6) → 4s 后 **LLEN=0**(消费者全部取走)
+  - **异步解耦确证**(日志线程名)：`[queue] LPUSH eventId=5` 在 webhook 线程 `nio-8082-exec-4`；`[match] 事件 5 命中规则 1` 在消费者线程 `-match-consumer`，晚 84ms
+  - DB 命中落库：event 5 → `hit_rule_id=1`、`priority` 0→**2**、status=0、handle_status=0；event 6(未命中) → hit_rule_id=**NULL**、priority=**0**
+  - alert_handle_record：仅 event 5 一条系统留痕 from_status=NULL/to_status=0/handler_name=`系统`、handle_remark=`规则命中：人群聚集预警(已改名)（crowdNum 15 命中阈值 >10）`；event 6 **无**记录
+  - 6c-3 钩子日志：`[match] 规则 1 notify_enabled=1，事件 5 待 6c-3 扇出通知`
+- **中文 HEX 确证**：handler_name=`系统` HEX=`E7B3BB·E7BB9F`(单次编码)；handle_remark 中文规则名 + reason 经 docker mysql utf8mb4 正确回显(控制台乱码仅 Windows codepage 显示假象，DB 字节正确)
+
 ---
 
 ## 待办
 
-- Step 6c：规则域 —— 6c-1(CRUD+引擎+试跑)✅ / 6c-2(receive LPUSH eventId + BRPOP 消费者 + 命中落库 hit_rule_id/priority/status) / 6c-3(Feign→auth @Inner 列管理员 → 写 sys_notification)
+- Step 6c：规则域 —— 6c-1(CRUD+引擎+试跑)✅ / 6c-2(异步队列 LPUSH/BRPOP + 命中落库 §5.3)✅ / 6c-3(Feign→auth @Inner 列管理员 → 写 sys_notification + status 置已推送)
 - Step 6d：处理域(状态机流转 + 处理记录留痕)
 - Step 6e：通知(5) + 分类字典(3)
 - 联调：Python webhook → 入库 → 前端 JWT 查询全链路

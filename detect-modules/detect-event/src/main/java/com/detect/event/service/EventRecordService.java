@@ -16,6 +16,7 @@ import com.detect.event.enums.HandleStatusEnum;
 import com.detect.event.enums.PriorityEnum;
 import com.detect.event.mapper.CameraManageMapper;
 import com.detect.event.mapper.EventRecordsMapper;
+import com.detect.event.queue.RuleMatchQueue;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -42,6 +43,7 @@ public class EventRecordService {
     private final EventRecordsMapper eventRecordsMapper;
     private final CameraManageMapper cameraManageMapper;
     private final OssTemplate ossTemplate;
+    private final RuleMatchQueue ruleMatchQueue;
 
     /**
      * 接收 Python 推送的单条事件。
@@ -97,7 +99,9 @@ public class EventRecordService {
         log.info("[receive] 事件入库 id={} device={} eventType={} snapTime={} snapUrl={}",
                 entity.getId(), entity.getDeviceNum(), entity.getEventType(), snapTime, entity.getSnapUrl());
 
-        // TODO(6c)：入库后 LPUSH eventId 到 Redis 轻量队列，异步触发布控规则匹配(不阻塞 webhook)
+        // 异步入队(§4.1.1)：LPUSH eventId，由 RuleMatchConsumer BRPOP 后匹配布控规则并落库命中(§5.3)，不阻塞 webhook。
+        // 注意：receive 无环绕事务，insert 已自动提交，消费者 selectById 必见已落库行，无读写竞态。
+        ruleMatchQueue.push(entity.getId());
         return entity.getId();
     }
 

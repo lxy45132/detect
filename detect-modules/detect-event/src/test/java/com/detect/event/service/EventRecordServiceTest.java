@@ -8,6 +8,7 @@ import com.detect.event.entity.CameraManage;
 import com.detect.event.entity.EventRecords;
 import com.detect.event.mapper.CameraManageMapper;
 import com.detect.event.mapper.EventRecordsMapper;
+import com.detect.event.queue.RuleMatchQueue;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
@@ -43,6 +44,8 @@ class EventRecordServiceTest {
     private CameraManageMapper cameraManageMapper;
     @Mock
     private OssTemplate ossTemplate;
+    @Mock
+    private RuleMatchQueue ruleMatchQueue;
 
     @InjectMocks
     private EventRecordService service;
@@ -94,6 +97,8 @@ class EventRecordServiceTest {
         assertEquals("SLAGTRUCK", saved.getVehicleNormalType());
         assertEquals(3, saved.getVehicleType().intValue());
         assertEquals(LocalDateTime.of(2026, 9, 10, 8, 49, 50, 123_000_000), saved.getSnapTime());
+        // 入库后异步入队(6c-2)：LPUSH 新事件 id 触发规则匹配
+        verify(ruleMatchQueue).push(10086L);
     }
 
     @Test
@@ -109,6 +114,8 @@ class EventRecordServiceTest {
         verify(eventRecordsMapper, never()).insert(any());
         verify(ossTemplate, never()).uploadBase64(any(), any(), any(), any());
         verify(cameraManageMapper, never()).selectOne(any());
+        // 幂等短路：不入队(避免对已存在事件重复匹配)
+        verify(ruleMatchQueue, never()).push(any());
     }
 
     @Test
