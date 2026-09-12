@@ -25,7 +25,7 @@ detect(父 pom)
 ├─ detect-auth                 认证服务器(签发 JWT)
 ├─ detect-gateway              网关(路由/跨域/聚合鉴权)   ✅
 └─ detect-modules
-   └─ detect-event             事件业务(CRUD/规则/统计/导出) 事件域✅(6b) 规则域✅(6c) 处理域✅(6d) 通知✅+字典✅(6e)
+   └─ detect-event             事件业务(CRUD/规则/统计/导出) 事件域✅(6b) 规则域✅(6c) 处理域✅(6d) 通知✅+字典✅(6e) 联调✅(Step7)
 ```
 
 ## 全局约定
@@ -432,9 +432,55 @@ detect(父 pom)
 
 ---
 
+## Step 7：端到端联调验证(真实视频 testcar1.mp4)  ✅ 全链路贯通 + 修复 1 个真实 BUG
+
+> 目标：不再手工构造 JSON，改跑**真实 Python 检测管线**(YOLO26 检测 testcar1.mp4 → EventEmitter webhook POST → Java 全链路)，验证「入库→规则命中→通知扇出→前端 JWT 查询」端到端贯通。非侵入契约不变(emitter 带 `from:Y`、据 `code==0` 判成功)。
+
+### 7-1 可行性勘察
+- **Python runner**：`Python310`(torch 2.12.0+**cpu** 无 GPU / ultralytics 8.4.66 / opencv 4.11.0)；`uv` 未装、Anaconda base 缺 DL 栈，故选定 Python310
+- **视频**：`C:\Users\HP\Desktop\testcar1.mp4`，1920x1020 / 29.76fps / **981 帧 / 33 秒**(短，CPU 可跑完，`--vid_stride 3` 提速)
+- **入口**：`main.py --source <video> --preset traffic --webhook-url http://127.0.0.1:8082/event-records/receive --device-id testcar-cam01 --output output/it`(traffic 预设→license_plate+vehicle_type，eventType=200)
+- **隔离**：`--output output/it` 写入全新目录，绕开 output/ 下 9/6 陈旧数据(metadata/plates/.relay_cursors/未发 spool)，非破坏、零仓库污染(output/ 已 gitignore)
+- **服务**：auth(8081)+event(8082) 在跑；gateway(9999) 未启但不需要(Python 直连 8082 receive @Inner 免鉴权、前端 JWT 查询也直连 8082)
+- **DB 现状**：仅 CROWD 规则(id=1,eventType=300)活跃、PLATE_BLACKLIST(id=2)已软删 → car 事件(200)不命中任何现存规则
+
+### 7-2 预建命中规则(保证链路贯通)
+- car 事件(200)与现存人群规则(300)门控不符，跑视频前用 JWT `POST /alert-rules` 预建 **DEVICE_TIME 规则 id=3**(`{"deviceNum":["testcar-cam01"]}`,eventType=200,priority=2,notify=1,enabled=1)
+- `POST /alert-rules/match-test` 预验证：matched=**True** reason="设备 testcar-cam01 在布控时段内"(不落库、零污染)
+- 消费者每次 `selectList(enabled=1)` 动态加载规则 → 新建 id=3 无需重启即生效
+
+### 7-3 跑批 + DB 全链路确证(中文 HEX 验证 UTF-8)
+- 跑批 **133.1s** 完成：读 981 帧 / 检测 327 帧(vid_stride=3) / 丢弃 0 / 模型数 3；**车牌识别 1 个唯一车牌 `浙C6B5P8` color=蓝色 conf=0.904**；vehicle_type=none(普通轿车不在启用类别)；**emitter `{'sent':1,'spooled':0,'failed':0,'dropped':0}`**(sent=1 即收到 code==0)
+- **event_records id=8**：event_type=200、plate_num HEX=`E6B599433642355038`→浙C6B5P8、**hit_rule_id=3**、**priority=2**(规则升级)、handle_status=0、**status=1(已推送)**、device_num=testcar-cam01、has_snap=1、snap_url=`http://localhost:9000/detect/event/20260912/05d3...5b54.jpg`
+- **MinIO 对象物理确认**：容器内 `/data/detect/event/20260912/05d3801bfb5349beb1dab38b8ec95b54.jpg`(xl.meta+分片)；匿名 GET snap_url 返 403(桶私有、非 404→确已上传；生产走预签名/鉴权代理)
+- **alert_handle_record id=7**：from=NULL→to=0、handler HEX=`E7B3BBE7BB9F`→**系统**、handle_time=15:12:30
+- **sys_notification id=2**：uid=1(admin)、type=alert、biz_id=8、priority=2、read_flag=0；title HEX→**联调-设备布控(testcar)**、content HEX→**testcar-cam01：设备 testcar-cam01 在布控时段内**
+- 链路：Python 检测真实车牌 → webhook(sent=1,code==0) → 入库+MinIO 转存 → 异步队列 → 命中规则3 → 升级 priority+系统留痕 → 扇出通知，DB 层逐项 HEX 坐实
+
+### 7-4 前端 JWT 全端点查询
+- **event page**：id=8 plateNum=浙C6B5P8、eventTypeName=车辆、task=license_plate、snapUrl、priority=2、hitRuleId=3 ✓
+- **todo**：id=8 在待办、**hitRuleName=联调-设备布控(testcar)** 已批量解析(selectBatchIds 防 N+1) ✓
+- **history**：系统留痕 handlerName=系统、remark=规则命中：联调-设备布控(testcar)(设备 testcar-cam01 在布控时段内) ✓
+- **notification page**：id=2 title/content 中文正确、type=alert、bizId=8；unread count=1 ✓
+- handle-statistics、event-categories enums(5类)、401 守卫、真实车牌 PLATE_BLACKLIST match-test(浙C6B5P8 命中 / 京ZZZZZZ 未命中) 均 ✓
+
+### 7-5 🐛 真实数据暴露的 BUG + 修复(TDD)
+- **现象**：`GET /event-records/8`(事件详情 §4.1.3)返 **HTTP 500 系统异常**(其余端点均正常)
+- **根因**(日志堆栈锁定)：`EventQueryService.parseSourceData()` 用 hutool `JSONUtil.parseObj()` 返回 `cn.hutool.json.JSONObject`；真实 license_plate 事件的 source_data 含 `"trackId":null`/`"charConfidence":null`，hutool 把 JSON null 存为 `cn.hutool.json.JSONNull` **单例**，Jackson 无该类型序列化器 → 响应序列化 `InvalidDefinitionException: No serializer found for class cn.hutool.json.JSONNull (through reference chain: ...EventRecordDetailVO["sourceData"]->JSONObject["trackId"])` → 500
+- **为何 6b-2 未暴露**：当时测试事件(people_gathering)的 source_data 无 null 值；真实车牌事件带 null 才触发。**同源潜在雷**：`AlertRuleService.parseJson()`(matchConfig/deviceScope/timeScope 解析进 AlertRuleListVO/DetailVO)同返 hutool JSON，规则配置一旦出现 JSON null 同样 500
+- **修复**：两处解析改用静态 Jackson `ObjectMapper.readValue(str, Object.class)` → 产出标准 `LinkedHashMap`/`ArrayList`，JSON null 映射为 **Java null**(Jackson 原生可序列化)；`extractTask`/`RuleMatcher` 等仅取标量(getStr/getLong)的内部解析不受影响、不改
+- **TDD**：先加 2 个回归测试(`EventQueryServiceTest.detail_sourceDataWithJsonNulls_isJacksonSerializable` + `AlertRuleServiceTest.detail_jsonColumnsWithNulls_areJacksonSerializable`)，RED 复现 `expected:<null> but was: cn.hutool.json.JSONNull@...`；改 Jackson 后 GREEN，**91 单测全绿**(89+2)BUILD SUCCESS
+- **复验**(重打 jar 16:18:22 + 重启 event PID140316)：`GET /event-records/8` → **HTTP 200 code=0**，sourceData=`{"bbox":[],"task":"license_plate","trackId":null,"confidence":0.9037,"plateColor":"蓝色","plateNumber":"浙C6B5P8","hasPlateCrop":false,"charConfidence":null}`(trackId/charConfidence 正确 null、中文正确)，响应体 `contains 'JSONNull'=False`；plateNum HEX 仍=浙C6B5P8、hitRuleId=3、priority=2、handleHistory=1
+
+**关键文件**(改动)：`service/EventQueryService`(parseSourceData→Jackson + 静态 MAPPER) · `service/AlertRuleService`(parseJson→Jackson + 静态 MAPPER) · `test/EventQueryServiceTest`(+1) · `test/AlertRuleServiceTest`(+1)
+
+**结论**：真实视频 testcar1.mp4 驱动的**全链路端到端贯通**(Python 检测→webhook→入库+MinIO→规则命中→系统留痕→通知扇出→前端 JWT 查询)，并借真实数据发现+修复了手工构造 JSON 无法暴露的 hutool JSONNull 序列化 500 缺陷。Step 6(事件/规则/处理/通知/字典全域)+ 联调验证全部完成。
+
+---
+
 ## 待办
 
 - Step 6c：规则域 ✅ —— 6c-1(CRUD+引擎+试跑)✅ / 6c-2(异步队列 LPUSH/BRPOP + 命中落库 §5.3)✅ / 6c-3(Feign→auth @Inner 列管理员 → 写 sys_notification + status 置已推送 §5.3/§4.4)✅
 - Step 6d：处理域 ✅ —— 6d-1(状态机 canTransition §5.2 + process/batch-process 写路径 §4.3.2/4.3.3)✅ / 6d-2(处理查询侧 todo/records/history/statistics §4.3.1/4.3.4~4.3.6)✅
 - Step 6e：通知 + 分类字典 ✅ —— 6e-1(站内通知 /notifications 5 端点 §4.4：page/unread-count/{id}read/read-all/{id}删除，user_id 从 JWT + ownership 越权 404)✅ / 6e-2(分类字典 /event-categories 3 端点 §4.5：types/tasks/enums 只读枚举不建表)✅
-- 联调：Python webhook → 入库 → 前端 JWT 查询全链路
+- 联调：Python webhook → 入库 → 规则命中 → 通知 → 前端 JWT 查询全链路 ✅ —— 真实视频 testcar1.mp4 跑通(检出真车牌浙C6B5P8)，event id=8 命中规则3→priority升级→系统留痕→扇出通知 id=2，前端 JWT 各端点数据贯通；过程中发现并修复 hutool JSONNull 序列化 500 BUG(见 Step 7)

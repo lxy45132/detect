@@ -13,6 +13,7 @@ import com.detect.event.vo.EventRecordDetailVO;
 import com.detect.event.vo.EventRecordListVO;
 import com.detect.event.vo.EventStatVO;
 import com.detect.common.core.domain.PageResult;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.servlet.http.HttpServletResponse;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -27,7 +28,9 @@ import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.mock;
@@ -120,6 +123,27 @@ class EventQueryServiceTest {
         assertEquals(1, vo.getHandleHistory().size());
         assertEquals("系统", vo.getHandleHistory().get(0).handlerName());
         assertEquals("2026-09-10 08:49:51", vo.getHandleHistory().get(0).handleTime());
+    }
+
+    /**
+     * 回归：真实 license_plate 事件的 source_data 含 JSON null(trackId/charConfidence)。
+     * hutool 会把 null 存为 {@code cn.hutool.json.JSONNull} 单例，Jackson 无序列化器 → 详情响应 500。
+     * 修复后应解析为标准 Map(JSON null→Java null)，且可被 Jackson 正常序列化。
+     */
+    @Test
+    void detail_sourceDataWithJsonNulls_isJacksonSerializable() throws Exception {
+        EventRecords e = sampleEntity();
+        e.setSourceData("{\"task\":\"license_plate\",\"plateNum\":\"浙C6B5P8\",\"trackId\":null,\"charConfidence\":null}");
+        when(eventRecordsMapper.selectById(10086L)).thenReturn(e);
+
+        EventRecordDetailVO vo = service.detail(10086L);
+
+        Map<?, ?> src = assertInstanceOf(Map.class, vo.getSourceData());
+        assertEquals("license_plate", src.get("task"));
+        assertNull(src.get("trackId"));                             // JSON null -> Java null，而非 JSONNull 单例
+        String json = new ObjectMapper().writeValueAsString(src);   // 修复前此处抛 InvalidDefinitionException
+        assertTrue(json.contains("\"trackId\":null"));
+        assertTrue(json.contains("浙C6B5P8"));
     }
 
     @Test

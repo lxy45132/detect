@@ -26,6 +26,7 @@ import com.detect.event.vo.EventRecordListVO;
 import com.detect.event.vo.EventStatVO;
 import com.detect.event.vo.HandleHistoryVO;
 import com.detect.event.vo.HitRuleVO;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.servlet.http.HttpServletResponse;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -65,6 +66,8 @@ public class EventQueryService {
     private static final long MAX_PAGE_SIZE = 200L;
     /** source_data 中提取 task 的 JSON 路径表达式 */
     private static final String TASK_JSON = "JSON_UNQUOTE(JSON_EXTRACT(source_data, '$.task'))";
+    /** source_data 解析用 Jackson mapper：产出标准 Map/List(JSON null→Java null)，规避 hutool JSONNull 无 Jackson 序列化器 */
+    private static final ObjectMapper MAPPER = new ObjectMapper();
 
     private final EventRecordsMapper eventRecordsMapper;
     private final AlertRuleMapper alertRuleMapper;
@@ -294,13 +297,17 @@ public class EventQueryService {
                 .toList();
     }
 
-    /** source_data JSON 字符串解析为对象(Map)供 Jackson 直出；失败回退原始字符串。 */
+    /**
+     * source_data JSON 字符串解析为标准对象(Map/List/标量)供 Jackson 直出；失败回退原始字符串。
+     * 用 Jackson(而非 hutool JSONUtil)解析：JSON null 映射为 Java null，避免 hutool 的
+     * {@code cn.hutool.json.JSONNull} 单例无 Jackson 序列化器导致详情响应 500。
+     */
     private Object parseSourceData(String sourceData) {
         if (!StringUtils.hasText(sourceData)) {
             return null;
         }
         try {
-            return JSONUtil.parseObj(sourceData);
+            return MAPPER.readValue(sourceData, Object.class);
         } catch (Exception ex) {
             log.warn("[detail] sourceData 解析失败，回退原始字符串: {}", ex.getMessage());
             return sourceData;

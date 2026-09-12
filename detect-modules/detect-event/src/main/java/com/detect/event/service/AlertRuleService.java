@@ -18,6 +18,7 @@ import com.detect.event.enums.RuleTypeEnum;
 import com.detect.event.mapper.AlertRuleMapper;
 import com.detect.event.vo.AlertRuleDetailVO;
 import com.detect.event.vo.AlertRuleListVO;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -53,6 +54,8 @@ public class AlertRuleService {
     private static final long MAX_PAGE_SIZE = 200L;
     /** crowdNum 阈值表达式(与 {@link RuleMatcher} 一致)，保存前校验用 */
     private static final Pattern CROWD_EXPR = Pattern.compile("^\\s*(>=|<=|==|>|<|=)\\s*(-?\\d+)\\s*$");
+    /** JSON 列解析用 Jackson mapper：产出标准 Map/List(JSON null→Java null)，规避 hutool JSONNull 无 Jackson 序列化器 */
+    private static final ObjectMapper MAPPER = new ObjectMapper();
 
     private final AlertRuleMapper alertRuleMapper;
     private final RuleMatcher ruleMatcher;
@@ -307,14 +310,16 @@ public class AlertRuleService {
         return vo;
     }
 
-    /** JSON 串解析为对象/数组直出；空返回 null，非法回退原始串。 */
+    /**
+     * JSON 串解析为标准对象/数组直出；空返回 null，非法回退原始串。
+     * 用 Jackson 解析：JSON null→Java null，规避 hutool {@code JSONNull} 单例无序列化器致规则详情/列表响应 500。
+     */
     private Object parseJson(String s) {
         if (s == null || s.isBlank()) {
             return null;
         }
         try {
-            String t = s.trim();
-            return t.startsWith("[") ? JSONUtil.parseArray(t) : JSONUtil.parseObj(t);
+            return MAPPER.readValue(s.trim(), Object.class);
         } catch (Exception e) {
             return s;
         }

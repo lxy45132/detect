@@ -10,6 +10,7 @@ import com.detect.event.entity.AlertRule;
 import com.detect.event.mapper.AlertRuleMapper;
 import com.detect.event.vo.AlertRuleDetailVO;
 import com.detect.event.vo.AlertRuleListVO;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
@@ -113,6 +114,24 @@ class AlertRuleServiceTest {
         assertEquals("08:00", ts.get("start"));
         assertEquals("2026-09-10 08:00:00", vo.getCreateTime());
         assertEquals("admin", vo.getCreateBy());
+    }
+
+    /**
+     * 回归：规则 JSON 列(timeScope 等)含 JSON null 时同样不能让 Jackson 序列化炸(与详情 sourceData 同源)。
+     */
+    @Test
+    void detail_jsonColumnsWithNulls_areJacksonSerializable() throws Exception {
+        AlertRule r = vehicleRule();
+        r.setTimeScope("{\"start\":\"08:00\",\"end\":null}");
+        when(alertRuleMapper.selectById(9L)).thenReturn(r);
+
+        AlertRuleDetailVO vo = service.detail(9L);
+
+        Map<?, ?> ts = assertInstanceOf(Map.class, vo.getTimeScope());
+        assertEquals("08:00", ts.get("start"));
+        assertNull(ts.get("end"));                              // JSON null -> Java null
+        String json = new ObjectMapper().writeValueAsString(vo.getTimeScope());
+        assertTrue(json.contains("\"end\":null"));
     }
 
     @Test
