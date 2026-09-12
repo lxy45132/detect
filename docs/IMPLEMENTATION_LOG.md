@@ -25,7 +25,7 @@ detect(父 pom)
 ├─ detect-auth                 认证服务器(签发 JWT)
 ├─ detect-gateway              网关(路由/跨域/聚合鉴权)   ✅
 └─ detect-modules
-   └─ detect-event             事件业务(CRUD/规则/统计/导出) 事件域✅(6b) 规则域✅(6c) 处理域🚧(6d-1✅)
+   └─ detect-event             事件业务(CRUD/规则/统计/导出) 事件域✅(6b) 规则域✅(6c) 处理域✅(6d)
 ```
 
 ## 全局约定
@@ -328,7 +328,7 @@ detect(父 pom)
 
 ---
 
-## Step 6d：处理域  🚧 进行中(拆 6d-1 状态机+处理写路径 / 6d-2 处理查询侧)
+## Step 6d：处理域  ✅ 已完成(拆 6d-1 状态机+处理写路径 / 6d-2 处理查询侧)
 
 ### 6d-1 状态机流转(§5.2) + 处理写路径(process/batch-process §4.3.2/§4.3.3)  ✅ 已完成(11 单测 + 8 步运行时端到端 + 中文 HEX 确证)
 
@@ -359,11 +359,36 @@ detect(父 pom)
   - **DB 留痕**：alert_handle_record 新增 4 条(id3~6) handler_id=1/handler_name=admin(取自 JWT)，from/to_status 与流转一致
 - **中文 HEX 确证**：handle_remark「受理中，核实」HEX=`E58F97·E79086·E4B8AD·EFBC8C(全角逗号)·E6A0B8·E5AE9E`、「已核实渣土车违规，转执法」HEX=`E5B7B2·E6A0B8·E5AE9E·E6B8A3·E59C9F·E8BDA6·E8BF9D·E8A784·EFBC8C·E8BDAC·E689A7·E6B395`、「批量标记误报」均单次编码正确(handler_name=admin 为 ASCII，来自 JWT username)
 
+### 6d-2 处理查询侧(todo/records/history/statistics §4.3.1/§4.3.4~§4.3.6)  ✅ 已完成(7 单测 + 8 步运行时端到端 + 中文确证 + statistics 逐项吻合 DB)
+
+**四个查询端点**(CQRS-lite 查询侧 `AlertHandleQueryService`，与写侧 `AlertHandleService` 分离)：
+- `GET /alert-handles/todo`(§4.3.1)：`handle_status ∈ {0,1}`(未处理/处理中)，按 `priority DESC, snap_time DESC`(紧急置顶)；结构同 §4.1.2 + `hitRuleName`(批量 `selectBatchIds` 解析避免 N+1)；支持 priority/eventType/deviceNum/snap_time 区间过滤
+- `GET /alert-handles/records`(§4.3.4)：处理记录分页，按 `handle_time DESC, id DESC`(最新在前)；支持 eventId/handlerId/handle_time 区间过滤
+- `GET /alert-handles/{eventId}/history`(§4.3.5)：单事件全部处理记录 `handle_time ASC`(时间正序)，复用 `HandleHistoryVO`；无记录/事件不存在均返空列表(规格未要求 1001)
+- `GET /alert-handles/statistics`(§4.3.6)：处理效率统计五项
+
+**关键文件**：`dto/TodoQueryDTO` · `dto/HandleRecordQueryDTO` · `vo/TodoVO`(§4.1.2 字段 + hitRuleName) · `vo/HandleRecordVO`(record) · `vo/HandleStatVO`(record，类注释文档化公式约定) · `service/AlertHandleQueryService`(todo/records/history/statistics + 私有 countEvents/avgHandleMinutes/toTodoVOs) · `controller/AlertHandleController`(+4 GET) · `test/AlertHandleQueryServiceTest`(7)
+
+**关键决策与踩坑**：
+- **statistics 公式为本期约定**(规格 §4.3.6 仅给字段名未定口径)：`pendingCount`/`processingCount`=事件 handle_status=0/1 计数(受 deviceNum + snap_time 区间过滤)；`falseRate`=误报(handle_status=3)/总数(0~1 两位小数，总数 0 取 0)；`todayResolved`=今日(handle_time ≥ 当日 00:00) to_status=2 处理记录数(不受 device/区间过滤，"今日"为字段固有语义)；`avgHandleMinutes`=已解决事件 snap_time→解决 handle_time 平均分钟(一位小数)
+- **avgHandleMinutes 用 Java 计算避免 join**：先查 to_status=2 处理记录，再按 eventId 批量查事件 snap_time，`Duration.between` 求均值(负值/空样本丢弃)，规避 SQL 跨表聚合
+- **todo 映射独立于 EventQueryService**：处理域内聚，少量映射重复可接受；hitRuleName 用 `selectBatchIds`(Set 去重)一次性解析避免 N+1
+- **分页参数夹取**：current `Math.max(.,1)`、size `Math.min(Math.max(.,1),200)`(§2.3)；字面单段 `/todo`、`/records`、`/statistics` 与双段 `/{eventId}/history` 无路由冲突
+
+**验证结果**：
+- 编译 + 单测：`mvn -pl detect-modules/detect-event test` BUILD SUCCESS；**76 单测全绿**(新增 AlertHandleQueryService 7，原 69 保持)；重打 fat jar(13:06:53)重启 event PID136372(auth PID129788 不动)
+- 运行时(真实 auth+event+MySQL，登录 admin/123456 取 JWT token_len=576)：
+  - **todo**：仅返 id=5(handle_status=0)，`hitRuleName`="人群聚集预警(已改名)" 批量解析正确，eventTypeName="聚集"/task="people_gathering"/snapTime 格式化；`?priority=2` 过滤生效
+  - **records**：total=6，序 id=6,5,4,3,2,1(handle_time DESC, id DESC)；`?eventId=7` 过滤 → 3 条(4,3,2)；handlerName="系统"(留痕)/"admin"(人工) 中文正确
+  - **history(7)**：正序 3 条(to_status 0→1→2；系统/admin/admin)，handleRemark 全角标点「规则命中：…（crowdNum 20 命中阈值 >10）」单次编码正确
+  - **statistics**：`{pendingCount:1, processingCount:0, todayResolved:1, falseRate:0.5, avgHandleMinutes:110.0}` —— 与 DB 状态推导值**逐项吻合**(pending=id5；ignored=id1,6→falseRate 2/4；todayResolved=id4 to_status=2；avg=event7 snap 11:00:00→handle 12:50:47=110 分钟)
+  - **JWT 保护**：无 token todo → HTTP=401 code=401「未认证」
+
 ---
 
 ## 待办
 
 - Step 6c：规则域 ✅ —— 6c-1(CRUD+引擎+试跑)✅ / 6c-2(异步队列 LPUSH/BRPOP + 命中落库 §5.3)✅ / 6c-3(Feign→auth @Inner 列管理员 → 写 sys_notification + status 置已推送 §5.3/§4.4)✅
-- Step 6d：处理域 🚧 —— 6d-1(状态机 canTransition §5.2 + process/batch-process 写路径 §4.3.2/4.3.3)✅ / 6d-2(处理查询侧 todo/records/history/statistics)
+- Step 6d：处理域 ✅ —— 6d-1(状态机 canTransition §5.2 + process/batch-process 写路径 §4.3.2/4.3.3)✅ / 6d-2(处理查询侧 todo/records/history/statistics §4.3.1/4.3.4~4.3.6)✅
 - Step 6e：通知(5) + 分类字典(3)
 - 联调：Python webhook → 入库 → 前端 JWT 查询全链路
