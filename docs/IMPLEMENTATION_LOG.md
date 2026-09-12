@@ -25,7 +25,7 @@ detect(父 pom)
 ├─ detect-auth                 认证服务器(签发 JWT)
 ├─ detect-gateway              网关(路由/跨域/聚合鉴权)   ✅
 └─ detect-modules
-   └─ detect-event             事件业务(CRUD/规则/统计/导出) 事件域✅(6b) 规则域✅(6c-1✅ 6c-2✅ 6c-3✅)
+   └─ detect-event             事件业务(CRUD/规则/统计/导出) 事件域✅(6b) 规则域✅(6c) 处理域🚧(6d-1✅)
 ```
 
 ## 全局约定
@@ -328,9 +328,42 @@ detect(父 pom)
 
 ---
 
+## Step 6d：处理域  🚧 进行中(拆 6d-1 状态机+处理写路径 / 6d-2 处理查询侧)
+
+### 6d-1 状态机流转(§5.2) + 处理写路径(process/batch-process §4.3.2/§4.3.3)  ✅ 已完成(11 单测 + 8 步运行时端到端 + 中文 HEX 确证)
+
+**状态机**(§5.2 矩阵)：`HandleStatusEnum.canTransition(from,to)` —— 0→{1,3}、1→{2,3}；2/3 终态无出边；对角线(同状态)、越界、null 一律非法。非法流转抛 `3001`(ResultCode.STATUS_TRANSITION_INVALID 已存在，无需新增)。
+
+**处理写路径**：
+- `POST /alert-handles/process`(§4.3.2)：校验事件存在(否则 1001) → 校验流转合法(否则 3001) → 更新 `event_records.handle_status` → 写 `alert_handle_record`(fromStatus/toStatus/handlerId/handlerName/handleRemark/handleTime)
+- `POST /alert-handles/batch-process`(§4.3.3)：逐条自调用 process，捕获 BizException(1001/3001 均在写库前抛出) → 「非法跳过、合法提交」部分成功，返回 `{processed, skipped[{eventId,reason}]}`
+- **处理人取自 JWT**：`SecurityUtils.getUserId()/getUsername()`(common-security)，不接受前端传入(防越权伪造)；handlerName=username(令牌不含 nickname)
+
+**关键文件**：`enums/HandleStatusEnum`(+canTransition) · `dto/HandleProcessDTO`(eventId/toStatus @NotNull + remark) · `dto/BatchHandleDTO`(eventIds @NotEmpty) · `vo/BatchHandleResultVO`(record: processed + skipped[Skipped(eventId,reason)]) · `service/AlertHandleService`(process/batchProcess) · `controller/AlertHandleController`(2 POST) · `test/HandleStatusEnumTest`(6) · `test/AlertHandleServiceTest`(5)
+
+**关键决策与踩坑**：
+- **批量事务语义**：batchProcess 与 process 均 @Transactional；batchProcess 内部**自调用** process(不经 Spring 代理→不新开事务→共享本批事务)。校验类异常(1001/3001)在任何写库前抛出，被 catch 后不污染事务，合法条目在批末统一提交——天然实现「部分成功」且规避自调用事务失效陷阱
+- **skipped 增强**：规格示例 `skipped:[]` 未定元素结构，本实现回报 `{eventId, reason}`(reason=错误码文案)以便前端提示，属兼容增强
+- **toStatus 不加 @Min/@Max**：越界目标(如 9)由 canTransition 判非法→3001(与规格「非法流转返 3001」一致)，不返 400，统一裁决口径
+- **mockStatic 测安全上下文**：SecurityUtils 为静态方法，Mockito 5(Boot 3.2.4)默认 inline mock maker 支持 `mockStatic`，无需额外依赖；校验类异常用例在取处理人前抛出，故 1001/3001 用例无需开 mockStatic
+- **留痕时间显式写**：AlertHandleRecord 不继承 BaseEntity(无自动填充)，handleTime 由服务层 `LocalDateTime.now()` 显式写入
+
+**验证结果**：
+- 编译 + 单测：`mvn -pl detect-modules/detect-event test` BUILD SUCCESS；**69 单测全绿**(新增 HandleStatusEnum 6 + AlertHandleService 5，原 58 保持)；重打 fat jar 重启(暂停期两服务已停，重启 auth PID129788 + event PID136612)
+- 运行时(真实 auth+event+MySQL，登录 admin/123456 取 JWT：user_id=1/authorities=ROLE_ADMIN)：
+  - **合法流转**：event7 0→1 code=0、1→2 code=0(handle_status 终为 2)
+  - **非法流转 3001**：event7 2→1(终态回退)、event5 0→2(跳级) 均 code=3001，msg「状态流转非法：已处理 → 处理中」/「未处理 → 已处理」，零写入
+  - **事件不存在 1001**：event999999 → code=1001
+  - **批量部分成功**：[1,6,999999]→3 → code=0 `{processed:2, skipped:[{eventId:999999,reason:事件不存在}]}`；event1/6 handle_status→3
+  - **JWT 保护**：无 token process → HTTP=401 code=401「未认证」
+  - **DB 留痕**：alert_handle_record 新增 4 条(id3~6) handler_id=1/handler_name=admin(取自 JWT)，from/to_status 与流转一致
+- **中文 HEX 确证**：handle_remark「受理中，核实」HEX=`E58F97·E79086·E4B8AD·EFBC8C(全角逗号)·E6A0B8·E5AE9E`、「已核实渣土车违规，转执法」HEX=`E5B7B2·E6A0B8·E5AE9E·E6B8A3·E59C9F·E8BDA6·E8BF9D·E8A784·EFBC8C·E8BDAC·E689A7·E6B395`、「批量标记误报」均单次编码正确(handler_name=admin 为 ASCII，来自 JWT username)
+
+---
+
 ## 待办
 
 - Step 6c：规则域 ✅ —— 6c-1(CRUD+引擎+试跑)✅ / 6c-2(异步队列 LPUSH/BRPOP + 命中落库 §5.3)✅ / 6c-3(Feign→auth @Inner 列管理员 → 写 sys_notification + status 置已推送 §5.3/§4.4)✅
-- Step 6d：处理域(状态机流转 + 处理记录留痕)
+- Step 6d：处理域 🚧 —— 6d-1(状态机 canTransition §5.2 + process/batch-process 写路径 §4.3.2/4.3.3)✅ / 6d-2(处理查询侧 todo/records/history/statistics)
 - Step 6e：通知(5) + 分类字典(3)
 - 联调：Python webhook → 入库 → 前端 JWT 查询全链路

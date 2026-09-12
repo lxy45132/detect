@@ -31,4 +31,33 @@ public enum HandleStatusEnum {
         }
         return null;
     }
+
+    /**
+     * 状态流转合法性校验(接口文档 §5.2 矩阵)。
+     *
+     * <pre>
+     * from\to   0    1    2    3
+     *   0       —    ✓    ✗    ✓      未处理 → 处理中 / 误报
+     *   1       ✗    —    ✓    ✓      处理中 → 已处理 / 误报
+     *   2       ✗    ✗    —    ✗      已处理(终态)
+     *   3       ✗    ✗    ✗    —      误报(终态)
+     * </pre>
+     *
+     * <p>对角线(同状态)恒非法；{@link #RESOLVED}/{@link #IGNORED} 为终态无出边；
+     * 目标非 0~3 或入参为 null 一律非法。非法流转由服务层抛 {@code 3001}。
+     *
+     * @param from 原状态 code
+     * @param to   目标状态 code
+     * @return 合法返回 true
+     */
+    public static boolean canTransition(Integer from, Integer to) {
+        if (from == null || to == null) {
+            return false;
+        }
+        return switch (from) {
+            case 0 -> to == 1 || to == 3;
+            case 1 -> to == 2 || to == 3;
+            default -> false;
+        };
+    }
 }
