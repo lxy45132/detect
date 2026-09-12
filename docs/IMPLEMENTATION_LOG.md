@@ -25,7 +25,7 @@ detect(父 pom)
 ├─ detect-auth                 认证服务器(签发 JWT)
 ├─ detect-gateway              网关(路由/跨域/聚合鉴权)   ✅
 └─ detect-modules
-   └─ detect-event             事件业务(CRUD/规则/统计/导出) 事件域✅(6b) 规则域✅(6c) 处理域✅(6d)
+   └─ detect-event             事件业务(CRUD/规则/统计/导出) 事件域✅(6b) 规则域✅(6c) 处理域✅(6d) 通知✅+字典✅(6e)
 ```
 
 ## 全局约定
@@ -386,9 +386,55 @@ detect(父 pom)
 
 ---
 
+## Step 6e：通知 + 分类字典  ✅ 已完成(拆 6e-1 站内通知 / 6e-2 分类字典)
+
+### 6e-1 站内通知 `/notifications`(§4.4，5 端点)  ✅ 已完成(8 单测 + 运行时 11 步 + 中文确证)
+
+**5 端点**(user_id 一律从 JWT 取，用户只能操作自己的通知)：
+- `GET /notifications/page`(§4.4.1)：本人通知分页，`create_time DESC, id DESC`；可按 readFlag(0/1)/type(alert/system) 过滤 → `PageResult<NotificationVO{id,title,content,type,bizId,priority,readFlag,createTime}>`
+- `GET /notifications/unread-count`(§4.4.2)：本人 read_flag=0 计数 → `{count:N}`(前端红点)
+- `PUT /notifications/{id}/read`(§4.4.3)：标记单条已读(写 read_time)；非本人/不存在报 404；已读则幂等直接成功(不覆盖首次 read_time)
+- `PUT /notifications/read-all`(§4.4.4)：本人未读批量置已读 → `{read:N}`(本次转已读条数)
+- `DELETE /notifications/{id}`(§4.4.5)：物理删(sys_notification 无 del_flag)，ownership-scoped；非本人/不存在报 404
+
+**关键文件**：`dto/NotificationQueryDTO` · `vo/NotificationVO`(record) · `vo/UnreadCountVO`(record:count) · `vo/ReadAllVO`(record:read) · `service/NotificationService`(+page/unreadCount/markRead/markAllRead/delete，与 6c-3 扇出同类) · `controller/NotificationController`(5 端点) · `test/NotificationServiceTest`(+8=13)
+
+**关键决策与踩坑**：
+- **并入 NotificationService 而非新建查询服务**：通知域小(1 扇出 + 5 用户侧)、Mapper 已注入，保持域内聚；类文档扩为「扇出 + 用户侧」双职责(不同于 event/handle 大域的 CQRS 拆分)
+- **ownership 越权统一 404**：非本人通知返 `NOT_FOUND(404,资源不存在)`而非 403——不泄露「该 id 存在但不属于你」的存在性；ResultCode 已有 404 无需新增码
+- **markRead 幂等**：已读(read_flag=1)再标记直接成功、不覆盖首次 read_time；delete/markAllRead 用 ownership-scoped 原子 UPDATE/DELETE(WHERE user_id=当前)
+- **markAllRead 返受影响行数**：`update(entity, wrapper)` 返回 int 即本次未读→已读条数，直接作 `{read:N}`
+
+**验证结果**：
+- 编译 + 单测：`mvn test` BUILD SUCCESS；NotificationServiceTest **13 绿**(5 扇出 + 8 用户侧：page scope+VO、unread-count、markRead 本人未读/非本人 404/已读幂等、markAllRead 返条数、delete 本人/非本人 404)；用户侧用 mockStatic 桩 SecurityUtils.getUserId
+- 运行时(真实 auth+event+MySQL，DB 现存 id=1 user_id=1 read_flag=0)：
+  - **page**：1 条(id=1,title=人群聚集预警(已改名),content=南河湫水闸(dev01)：crowdNum 20 命中阈值 >10,type=alert,bizId=7,priority=2,readFlag=0,createTime 格式化) 中文正确
+  - **unread-count** {count:1} → **read-all** {read:1} → **unread-count** {count:0}(全部已读生效)；**单条 read**(已读后) code=0 幂等；**page?readFlag=1** 1 条 readFlag=1
+  - **delete 999999** HTTP=200 code=404「资源不存在」；**delete 1** code=0 物理删；**page**(删后) total=0；**无 token** page → HTTP=401
+
+### 6e-2 分类字典 `/event-categories`(§4.5，3 端点，只读枚举不建表)  ✅ 已完成(5 单测 + 运行时 4 步)
+
+**3 端点**(字典以枚举为唯一真源，不查库)：
+- `GET /event-categories/types`(§4.5.1)：事件大类 → `[{code,name}]`(EventTypeEnum：100人脸/200车辆/300聚集)
+- `GET /event-categories/tasks`(§4.5.2)：事件子类，`?eventType` 可选按大类过滤 → `[{code,name,eventType}]`(TaskTypeEnum 6 项)
+- `GET /event-categories/enums`(§4.5.3)：一次性全量 → `{eventType,task,handleStatus,priority,ruleType}`(前端启动缓存)
+
+**关键文件**：`vo/EnumItemVO`(record:Object code+String name) · `vo/TaskItemVO`(record:String code+name+Integer eventType) · `vo/EventEnumsVO`(record:5 List) · `service/EventCategoryService`(无依赖，enum.values()→VO) · `controller/EventCategoryController`(3 GET) · `test/EventCategoryServiceTest`(5)
+
+**关键决策与踩坑**：
+- **EnumItemVO.code 用 Object**：eventType/handleStatus/priority 为 Integer code(序列化 JSON number)、ruleType 为 String code(序列化 JSON string)，一个 VO 兼容两型且输出与规格逐字一致
+- **VO 分离避免 null 污染**：全局 Jackson **序列化 null**(实测 todo 响应含 snapUrl:null)，故 task 用独立 `TaskItemVO`(带 eventType)、其余用 `EnumItemVO`(无 eventType 字段)——否则 types/handleStatus 等会多出 `"eventType":null`
+- **字典即枚举**：不建表、不查库，5 个既有枚举(EventType/TaskType/HandleStatus/Priority/RuleType)为唯一真源，前端翻译与下拉共用
+
+**验证结果**：
+- 编译 + 单测：`mvn test` BUILD SUCCESS；**89 单测全绿**(EventCategoryServiceTest 5：types 3 项、tasks 全量 6/eventType=200 过滤 4/=300 过滤 1、enums 五类条数 3/6/4/3/4 + 代表项 code·name)
+- 运行时：types 3 项中文正确；tasks?eventType=200 → 4 项(vehicle_type/license_plate/plate_unrecognized/ship_plate 均 eventType=200)；enums 五类齐全，**Integer code 输出为数字(100/0)、String code 输出为字符串(PLATE_BLACKLIST)，无 eventType:null 污染**；无 token → HTTP=401
+
+---
+
 ## 待办
 
 - Step 6c：规则域 ✅ —— 6c-1(CRUD+引擎+试跑)✅ / 6c-2(异步队列 LPUSH/BRPOP + 命中落库 §5.3)✅ / 6c-3(Feign→auth @Inner 列管理员 → 写 sys_notification + status 置已推送 §5.3/§4.4)✅
 - Step 6d：处理域 ✅ —— 6d-1(状态机 canTransition §5.2 + process/batch-process 写路径 §4.3.2/4.3.3)✅ / 6d-2(处理查询侧 todo/records/history/statistics §4.3.1/4.3.4~4.3.6)✅
-- Step 6e：通知(5) + 分类字典(3)
+- Step 6e：通知 + 分类字典 ✅ —— 6e-1(站内通知 /notifications 5 端点 §4.4：page/unread-count/{id}read/read-all/{id}删除，user_id 从 JWT + ownership 越权 404)✅ / 6e-2(分类字典 /event-categories 3 端点 §4.5：types/tasks/enums 只读枚举不建表)✅
 - 联调：Python webhook → 入库 → 前端 JWT 查询全链路
