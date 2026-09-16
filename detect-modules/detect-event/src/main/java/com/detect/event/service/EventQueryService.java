@@ -348,6 +348,7 @@ public class EventQueryService {
             }
             return Boolean.TRUE.equals(aiReview.getBool("overridden", false));
         } catch (Exception ex) {
+            log.debug("[extractAiCorrected] sourceData 解析失败，降级 false: {}", ex.getMessage());
             return false;
         }
     }
