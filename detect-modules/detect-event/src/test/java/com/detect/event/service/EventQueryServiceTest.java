@@ -13,6 +13,7 @@ import com.detect.event.vo.EventRecordDetailVO;
 import com.detect.event.vo.EventRecordListVO;
 import com.detect.event.vo.EventStatVO;
 import com.detect.common.core.domain.PageResult;
+import com.detect.common.oss.OssTemplate;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.servlet.http.HttpServletResponse;
 import org.junit.jupiter.api.Test;
@@ -51,6 +52,8 @@ class EventQueryServiceTest {
     private AlertRuleMapper alertRuleMapper;
     @Mock
     private AlertHandleRecordMapper alertHandleRecordMapper;
+    @Mock
+    private OssTemplate ossTemplate;
 
     @InjectMocks
     private EventQueryService service;
@@ -91,6 +94,48 @@ class EventQueryServiceTest {
         assertEquals("SLAGTRUCK", vo.getVehicleNormalType());
         assertEquals(1, vo.getPriority().intValue());
         assertEquals(5L, vo.getHitRuleId());
+    }
+
+    /**
+     * 桶保持私有时，读出侧必须把库里存的稳定 URL 换成预签名 URL，
+     * 否则浏览器 {@code <img>} 匿名请求会被 MinIO 拒 403（图全部加载失败）。
+     * 人脸库两张图同口径；为 null 的字段不应被改写成非 null。
+     */
+    @Test
+    void detail_replacesStoredUrlWithPresignedUrl() {
+        EventRecords e = sampleEntity();
+        e.setSnapUrl("http://localhost:9000/detect/event/20260911/x.jpg");
+        e.setIdentifyFaceUrl("http://localhost:9000/detect/face/lib.jpg");
+        when(eventRecordsMapper.selectById(10086L)).thenReturn(e);
+        when(ossTemplate.toPresignedUrl("http://localhost:9000/detect/event/20260911/x.jpg"))
+                .thenReturn("http://localhost:9000/detect/event/20260911/x.jpg?X-Amz-Signature=abc");
+        when(ossTemplate.toPresignedUrl("http://localhost:9000/detect/face/lib.jpg"))
+                .thenReturn("http://localhost:9000/detect/face/lib.jpg?X-Amz-Signature=def");
+
+        EventRecordDetailVO vo = service.detail(10086L);
+
+        assertTrue(vo.getSnapUrl().contains("X-Amz-Signature=abc"), vo.getSnapUrl());
+        assertTrue(vo.getIdentifyFaceUrl().contains("X-Amz-Signature=def"), vo.getIdentifyFaceUrl());
+        // 未存图的字段保持 null，前端据此显示「无抓拍图」而非破图
+        assertNull(vo.getVisibleLightUrl());
+    }
+
+    @Test
+    void page_replacesStoredUrlWithPresignedUrl() {
+        EventRecords e = sampleEntity();
+        e.setSnapUrl("http://localhost:9000/detect/event/20260911/x.jpg");
+        when(eventRecordsMapper.selectPage(any(), any())).thenAnswer(inv -> {
+            Page<EventRecords> p = inv.getArgument(0);
+            p.setRecords(List.of(e));
+            p.setTotal(1L);
+            return p;
+        });
+        when(ossTemplate.toPresignedUrl("http://localhost:9000/detect/event/20260911/x.jpg"))
+                .thenReturn("http://localhost:9000/detect/event/20260911/x.jpg?X-Amz-Signature=abc");
+
+        EventRecordListVO vo = service.page(new EventQueryDTO()).getRecords().get(0);
+
+        assertTrue(vo.getSnapUrl().contains("X-Amz-Signature=abc"), vo.getSnapUrl());
     }
 
     @Test
@@ -186,5 +231,52 @@ class EventQueryServiceTest {
 
         assertEquals(4001, ex.getCode());
         verify(eventRecordsMapper, never()).selectList(any());
+    }
+
+    // ---- aiCorrected 提取 ----
+
+    @Test
+    void page_aiCorrected_true_when_overridden() {
+        EventRecords e = sampleEntity();
+        e.setSourceData("{\"task\":\"vehicle_type\",\"aiReview\":{\"overridden\":true,\"status\":\"ok\"}}");
+        when(eventRecordsMapper.selectPage(any(), any())).thenAnswer(inv -> {
+            Page<EventRecords> p = inv.getArgument(0);
+            p.setRecords(List.of(e));
+            p.setTotal(1L);
+            return p;
+        });
+
+        PageResult<EventRecordListVO> result = service.page(new EventQueryDTO());
+        assertTrue(result.getRecords().get(0).getAiCorrected());
+    }
+
+    @Test
+    void page_aiCorrected_false_when_not_overridden() {
+        EventRecords e = sampleEntity();
+        e.setSourceData("{\"task\":\"vehicle_type\",\"aiReview\":{\"overridden\":false,\"status\":\"ok\"}}");
+        when(eventRecordsMapper.selectPage(any(), any())).thenAnswer(inv -> {
+            Page<EventRecords> p = inv.getArgument(0);
+            p.setRecords(List.of(e));
+            p.setTotal(1L);
+            return p;
+        });
+
+        PageResult<EventRecordListVO> result = service.page(new EventQueryDTO());
+        assertEquals(false, result.getRecords().get(0).getAiCorrected());
+    }
+
+    @Test
+    void page_aiCorrected_false_when_no_aiReview() {
+        EventRecords e = sampleEntity();
+        // sourceData 无 aiReview 字段
+        when(eventRecordsMapper.selectPage(any(), any())).thenAnswer(inv -> {
+            Page<EventRecords> p = inv.getArgument(0);
+            p.setRecords(List.of(e));
+            p.setTotal(1L);
+            return p;
+        });
+
+        PageResult<EventRecordListVO> result = service.page(new EventQueryDTO());
+        assertEquals(false, result.getRecords().get(0).getAiCorrected());
     }
 }

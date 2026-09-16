@@ -40,6 +40,37 @@ public final class OssUtils {
         return sb.toString();
     }
 
+    /**
+     * 从稳定访问 URL 反解对象键：{publicBase}/{bucket}/{objectName} → objectName，
+     * 是 {@link #buildUrl} 的逆操作，供预签名使用（库里存的是完整 URL，没存对象键）。
+     *
+     * <p>先按 "{base}/{bucket}/" 前缀匹配；匹配不上则退化到定位 "/{bucket}/" 段 ——
+     * 因为 {@code public-url} 改过域名后，库里历史 URL 的 host 与当前配置会不一致，
+     * 只做严格前缀匹配会让老数据全部无法预签名。
+     *
+     * @return 对象键；入参为空或不是本桶 URL（例如外链）时返回 {@code null}，调用方据此原样返回
+     */
+    public static String extractObjectName(String url, String publicBase, String bucket) {
+        if (url == null || url.isBlank()) {
+            return null;
+        }
+        String b = trimSlash(bucket == null ? "" : bucket);
+        String base = trimSlash(publicBase == null ? "" : publicBase);
+
+        String prefix = base + (b.isEmpty() ? "" : "/" + b) + "/";
+        // prefix 为 "/" 意味着 base 与 bucket 都空，此时任何 URL 都会“匹配”，必须排除
+        if (!"/".equals(prefix) && url.startsWith(prefix)) {
+            return url.substring(prefix.length());
+        }
+        if (!b.isEmpty()) {
+            int idx = url.indexOf("/" + b + "/");
+            if (idx >= 0) {
+                return url.substring(idx + b.length() + 2);
+            }
+        }
+        return null;
+    }
+
     /** 解码 base64，自动剥离 data URI 前缀(data:image/png;base64,)与空白字符 */
     public static byte[] decodeBase64(String base64) {
         if (base64 == null) {

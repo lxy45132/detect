@@ -2,6 +2,7 @@ package com.detect.event.service;
 
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.detect.common.core.domain.PageResult;
+import com.detect.common.oss.OssTemplate;
 import com.detect.event.dto.HandleRecordQueryDTO;
 import com.detect.event.dto.TodoQueryDTO;
 import com.detect.event.entity.AlertHandleRecord;
@@ -47,6 +48,9 @@ class AlertHandleQueryServiceTest {
     private AlertHandleRecordMapper alertHandleRecordMapper;
     @Mock
     private AlertRuleMapper alertRuleMapper;
+    /** 待办列表的 snapUrl 也走预签名；本类不断言图片 URL（该口径已由 EventQueryServiceTest 覆盖） */
+    @Mock
+    private OssTemplate ossTemplate;
 
     @InjectMocks
     private AlertHandleQueryService service;
@@ -102,6 +106,44 @@ class AlertHandleQueryServiceTest {
         assertNull(v2.getHitRuleName());   // hitRuleId 为 null → 名称 null
         // 批量解析：selectBatchIds 仅调一次(避免 N+1)
         verify(alertRuleMapper, times(1)).selectBatchIds(any());
+    }
+
+    /**
+     * 回归(2026-09-16)：全部事件 hitRuleId 为 null 时，ruleIds 为空集 → ruleNames = Map.of()。
+     * JDK 不可变 Map 对 null key get 会抛 NPE(ImmutableCollections$MapN.get → Objects.requireNonNull)，
+     * 服务层必须在取值前显式判空，绝不能把 null 传进去。
+     */
+    @Test
+    void todo_allHitRuleIdNull_doesNotQueryRuleNorThrow() {
+        EventRecords e1 = new EventRecords();
+        e1.setId(11L);
+        e1.setEventType(200);
+        e1.setSnapTime(LocalDateTime.of(2026, 9, 15, 8, 0, 0));
+        e1.setHandleStatus(0);
+        e1.setPriority(1);
+        e1.setHitRuleId(null);
+        EventRecords e2 = new EventRecords();
+        e2.setId(12L);
+        e2.setEventType(300);
+        e2.setSnapTime(LocalDateTime.of(2026, 9, 15, 9, 0, 0));
+        e2.setHandleStatus(1);
+        e2.setPriority(0);
+        e2.setHitRuleId(null);
+
+        when(eventRecordsMapper.selectPage(any(), any())).thenAnswer(inv -> {
+            Page<EventRecords> p = inv.getArgument(0);
+            p.setRecords(List.of(e1, e2));
+            p.setTotal(2L);
+            return p;
+        });
+
+        PageResult<TodoVO> result = service.todo(new TodoQueryDTO());
+
+        assertEquals(2, result.getRecords().size());
+        assertNull(result.getRecords().get(0).getHitRuleName());
+        assertNull(result.getRecords().get(1).getHitRuleName());
+        // ruleIds 为空 → 不应发起规则批查
+        verify(alertRuleMapper, times(0)).selectBatchIds(any());
     }
 
     @Test
@@ -230,5 +272,49 @@ class AlertHandleQueryServiceTest {
         assertEquals(0L, stat.todayResolved());
         assertEquals(0.0, stat.falseRate());       // total=0 → 0，不除零
         assertEquals(0.0, stat.avgHandleMinutes());
+    }
+
+    // ---- aiCorrected 提取 ----
+
+    @Test
+    void todo_aiCorrected_true_when_overridden() {
+        EventRecords e = new EventRecords();
+        e.setId(20L);
+        e.setEventType(200);
+        e.setSnapTime(LocalDateTime.of(2026, 9, 16, 10, 0, 0));
+        e.setHandleStatus(0);
+        e.setPriority(1);
+        e.setHitRuleId(null);
+        e.setSourceData("{\"task\":\"vehicle_type\",\"aiReview\":{\"overridden\":true,\"status\":\"ok\"}}");
+        when(eventRecordsMapper.selectPage(any(), any())).thenAnswer(inv -> {
+            Page<EventRecords> p = inv.getArgument(0);
+            p.setRecords(List.of(e));
+            p.setTotal(1L);
+            return p;
+        });
+
+        PageResult<TodoVO> result = service.todo(new TodoQueryDTO());
+        assertTrue(result.getRecords().get(0).getAiCorrected());
+    }
+
+    @Test
+    void todo_aiCorrected_false_when_no_aiReview() {
+        EventRecords e = new EventRecords();
+        e.setId(21L);
+        e.setEventType(200);
+        e.setSnapTime(LocalDateTime.of(2026, 9, 16, 11, 0, 0));
+        e.setHandleStatus(0);
+        e.setPriority(1);
+        e.setHitRuleId(null);
+        e.setSourceData("{\"task\":\"license_plate\"}");
+        when(eventRecordsMapper.selectPage(any(), any())).thenAnswer(inv -> {
+            Page<EventRecords> p = inv.getArgument(0);
+            p.setRecords(List.of(e));
+            p.setTotal(1L);
+            return p;
+        });
+
+        PageResult<TodoVO> result = service.todo(new TodoQueryDTO());
+        assertEquals(false, result.getRecords().get(0).getAiCorrected());
     }
 }

@@ -9,6 +9,7 @@ import com.detect.common.core.constant.CommonConstants;
 import com.detect.common.core.domain.PageResult;
 import com.detect.common.core.enums.ResultCode;
 import com.detect.common.core.exception.BizException;
+import com.detect.common.oss.OssTemplate;
 import com.detect.event.dto.EventQueryDTO;
 import com.detect.event.entity.AlertHandleRecord;
 import com.detect.event.entity.AlertRule;
@@ -72,6 +73,8 @@ public class EventQueryService {
     private final EventRecordsMapper eventRecordsMapper;
     private final AlertRuleMapper alertRuleMapper;
     private final AlertHandleRecordMapper alertHandleRecordMapper;
+    /** 只用于读出时把库里的稳定图片 URL 换成限时预签名 URL（桶保持私有） */
+    private final OssTemplate ossTemplate;
 
     /**
      * 分页查询事件列表(§4.1.2)。默认 {@code snap_time DESC}；size 夹取 [1,200]。
@@ -107,13 +110,17 @@ public class EventQueryService {
         vo.setEventType(e.getEventType());
         vo.setEventTypeName(EventTypeEnum.nameOf(e.getEventType()));
         vo.setSnapTime(formatTime(e.getSnapTime()));
-        vo.setSnapUrl(e.getSnapUrl());
+        // 桶保持私有：库里存的是稳定 URL，匿名请求会被 MinIO 拒 403；
+        // 读出时换成限时预签名 URL，浏览器 <img> 无需任何凭据即可取图。
+        // 字段为 null 时原样返回 null（前端据此显示「无抓拍图」）。
+        vo.setSnapUrl(ossTemplate.toPresignedUrl(e.getSnapUrl()));
         vo.setName(e.getName());
         vo.setCardno(e.getCardno());
         vo.setLibName(e.getLibName());
         vo.setSimilarity(e.getSimilarity());
-        vo.setIdentifyFaceUrl(e.getIdentifyFaceUrl());
-        vo.setVisibleLightUrl(e.getVisibleLightUrl());
+        // 人脸库两张图同为 MinIO 对象，同样需签名；若存的是供应商外链则反解失败、原样返回
+        vo.setIdentifyFaceUrl(ossTemplate.toPresignedUrl(e.getIdentifyFaceUrl()));
+        vo.setVisibleLightUrl(ossTemplate.toPresignedUrl(e.getVisibleLightUrl()));
         vo.setPlateNum(e.getPlateNum());
         vo.setVehicleType(e.getVehicleType());
         vo.setVehicleNormalType(e.getVehicleNormalType());
@@ -253,13 +260,15 @@ public class EventQueryService {
         vo.setEventTypeName(EventTypeEnum.nameOf(e.getEventType()));
         vo.setTask(extractTask(e.getSourceData()));
         vo.setSnapTime(formatTime(e.getSnapTime()));
-        vo.setSnapUrl(e.getSnapUrl());
+        // 同详情：列表缩略图也需预签名，否则私有桶下全部 403
+        vo.setSnapUrl(ossTemplate.toPresignedUrl(e.getSnapUrl()));
         vo.setPlateNum(e.getPlateNum());
         vo.setVehicleNormalType(e.getVehicleNormalType());
         vo.setCrowdNum(e.getCrowdNum());
         vo.setHandleStatus(e.getHandleStatus());
         vo.setPriority(e.getPriority());
         vo.setHitRuleId(e.getHitRuleId());
+        vo.setAiCorrected(extractAiCorrected(e.getSourceData()));
         return vo;
     }
 
@@ -323,6 +332,23 @@ public class EventQueryService {
             return JSONUtil.parseObj(sourceData).getStr("task");
         } catch (Exception ex) {
             return null;
+        }
+    }
+
+    /** 从 source_data 提取 aiReview.overridden；缺失或解析失败返回 false。 */
+    private Boolean extractAiCorrected(String sourceData) {
+        if (!StringUtils.hasText(sourceData)) {
+            return false;
+        }
+        try {
+            var obj = JSONUtil.parseObj(sourceData);
+            var aiReview = obj.getJSONObject("aiReview");
+            if (aiReview == null) {
+                return false;
+            }
+            return Boolean.TRUE.equals(aiReview.getBool("overridden", false));
+        } catch (Exception ex) {
+            return false;
         }
     }
 

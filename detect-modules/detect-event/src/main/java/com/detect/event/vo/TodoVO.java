@@ -30,4 +30,6 @@ public class TodoVO {
     private Long hitRuleId;
     /** 命中规则名(hitRuleId 解析，未命中为 null) */
     private String hitRuleName;
+    /** AI 复核是否修正了原值(sourceData.aiReview.overridden) */
+    private Boolean aiCorrected;
 }

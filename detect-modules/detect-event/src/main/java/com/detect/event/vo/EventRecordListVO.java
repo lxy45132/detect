@@ -28,4 +28,6 @@ public class EventRecordListVO {
     private Integer handleStatus;
     private Integer priority;
     private Long hitRuleId;
+    /** AI 复核是否修正了原值(sourceData.aiReview.overridden) */
+    private Boolean aiCorrected;
 }

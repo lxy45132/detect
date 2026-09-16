@@ -100,6 +100,35 @@ public class OssTemplate {
         return OssUtils.buildUrl(base, props.getBucket(), objectName);
     }
 
+    /**
+     * 把库里存的稳定 URL 换成限时预签名 URL，使用配置的默认有效期。
+     *
+     * <p>用于「桶保持私有 + 浏览器 {@code <img>} 直接取图」的场景：签名自带凭据
+     * (X-Amz-Signature 等 query 参数)，MinIO 直接校验，不需要匿名读策略，也不需要
+     * 前端带 Authorization 头({@code <img>} 根本不会带)。
+     *
+     * <p><b>降级保证</b>：入参为空、或反解不出对象键(不是本桶的 URL，例如人脸库供应商外链)
+     * 时<b>原样返回</b>，不报错也不返回 null —— 读出侧不能因为一张图而让整个列表/详情接口 500。
+     */
+    public String toPresignedUrl(String storedUrl) {
+        return toPresignedUrl(storedUrl, props.getPresignExpireSeconds());
+    }
+
+    /** 同 {@link #toPresignedUrl(String)}，但指定有效期(秒) */
+    public String toPresignedUrl(String storedUrl, int expireSeconds) {
+        if (storedUrl == null || storedUrl.isBlank()) {
+            return storedUrl;
+        }
+        String base = (props.getPublicUrl() == null || props.getPublicUrl().isBlank())
+                ? props.getEndpoint() : props.getPublicUrl();
+        String objectName = OssUtils.extractObjectName(storedUrl, base, props.getBucket());
+        if (objectName == null) {
+            log.warn("[oss] 无法从 URL 反解对象键，原样返回(不属本桶或配置不匹配): {}", storedUrl);
+            return storedUrl;
+        }
+        return getPresignedUrl(objectName, expireSeconds);
+    }
+
     /** 首次写入时确保桶存在(不存在则创建)，仅检查一次 */
     private void ensureBucket() {
         if (bucketReady.get()) {

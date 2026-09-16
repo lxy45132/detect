@@ -24,4 +24,13 @@ public class OssProperties {
 
     /** 对外访问基础 URL(拼接可访问地址)，为空则回退 endpoint */
     private String publicUrl;
+
+    /**
+     * 预签名 URL 有效期(秒)，默认 30 分钟。
+     *
+     * <p>桶保持私有时，读出侧把库里存的稳定 URL 换成限时签名 URL 交给前端，
+     * 浏览器 {@code <img>} 无需携带任何凭据即可取图。太短会让用户停留页面后
+     * 点放大失效，太长等于变相公开，30 分钟是两者的折中。
+     */
+    private int presignExpireSeconds = 1800;
 }

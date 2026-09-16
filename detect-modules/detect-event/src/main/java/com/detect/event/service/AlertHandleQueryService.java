@@ -5,6 +5,7 @@ import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.detect.common.core.constant.CommonConstants;
 import com.detect.common.core.domain.PageResult;
+import com.detect.common.oss.OssTemplate;
 import com.detect.event.dto.HandleRecordQueryDTO;
 import com.detect.event.dto.TodoQueryDTO;
 import com.detect.event.entity.AlertHandleRecord;
@@ -54,6 +55,8 @@ public class AlertHandleQueryService {
     private final EventRecordsMapper eventRecordsMapper;
     private final AlertHandleRecordMapper alertHandleRecordMapper;
     private final AlertRuleMapper alertRuleMapper;
+    /** 待办列表的抓拍图同样需要预签名（桶保持私有），与事件列表/详情口径一致 */
+    private final OssTemplate ossTemplate;
 
     /** 待办列表(§4.3.1)：{@code handle_status ∈ {0,1}}，按 {@code priority DESC, snap_time DESC}(紧急置顶)。 */
     public PageResult<TodoVO> todo(TodoQueryDTO q) {
@@ -165,14 +168,24 @@ public class AlertHandleQueryService {
         return count == 0 ? 0.0 : ratio(totalMinutes, count, 1);
     }
 
-    /** 批量映射 TodoVO：一次性解析 hitRuleName(去重 selectBatchIds)避免 N+1。 */
+    /**
+     * 批量映射 TodoVO：一次性解析 hitRuleName(去重 selectBatchIds)避免 N+1。
+     *
+     * <p>注意：{@code Map.of()} 返回的不可变 Map 对 null key 会抛 NPE(JDK 契约)，
+     * 而 {@code event_records.hit_rule_id} 允许为 null(未命中任何规则)，故取值前显式判空。
+     */
     private List<TodoVO> toTodoVOs(List<EventRecords> events) {
         Set<Long> ruleIds = events.stream().map(EventRecords::getHitRuleId)
                 .filter(Objects::nonNull).collect(Collectors.toSet());
         Map<Long, String> ruleNames = ruleIds.isEmpty() ? Map.of()
                 : alertRuleMapper.selectBatchIds(ruleIds).stream()
                         .collect(Collectors.toMap(AlertRule::getId, AlertRule::getRuleName, (a, b) -> a));
-        return events.stream().map(e -> toTodoVO(e, ruleNames.get(e.getHitRuleId()))).toList();
+        return events.stream()
+                .map(e -> {
+                    Long rid = e.getHitRuleId();
+                    return toTodoVO(e, rid == null ? null : ruleNames.get(rid));
+                })
+                .toList();
     }
 
     private TodoVO toTodoVO(EventRecords e, String hitRuleName) {
@@ -184,7 +197,7 @@ public class AlertHandleQueryService {
         vo.setEventTypeName(EventTypeEnum.nameOf(e.getEventType()));
         vo.setTask(extractTask(e.getSourceData()));
         vo.setSnapTime(formatTime(e.getSnapTime()));
-        vo.setSnapUrl(e.getSnapUrl());
+        vo.setSnapUrl(ossTemplate.toPresignedUrl(e.getSnapUrl()));
         vo.setPlateNum(e.getPlateNum());
         vo.setVehicleNormalType(e.getVehicleNormalType());
         vo.setCrowdNum(e.getCrowdNum());
@@ -192,6 +205,7 @@ public class AlertHandleQueryService {
         vo.setPriority(e.getPriority());
         vo.setHitRuleId(e.getHitRuleId());
         vo.setHitRuleName(hitRuleName);
+        vo.setAiCorrected(extractAiCorrected(e.getSourceData()));
         return vo;
     }
 
@@ -209,6 +223,23 @@ public class AlertHandleQueryService {
             return JSONUtil.parseObj(sourceData).getStr("task");
         } catch (Exception ex) {
             return null;
+        }
+    }
+
+    /** 从 source_data 提取 aiReview.overridden；缺失或解析失败返回 false。 */
+    private Boolean extractAiCorrected(String sourceData) {
+        if (!StringUtils.hasText(sourceData)) {
+            return false;
+        }
+        try {
+            var obj = JSONUtil.parseObj(sourceData);
+            var aiReview = obj.getJSONObject("aiReview");
+            if (aiReview == null) {
+                return false;
+            }
+            return Boolean.TRUE.equals(aiReview.getBool("overridden", false));
+        } catch (Exception ex) {
+            return false;
         }
     }
 

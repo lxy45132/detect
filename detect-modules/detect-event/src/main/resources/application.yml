@@ -38,7 +38,7 @@ mybatis-plus:
   global-config:
     banner: false
 
-# 对象存储(MinIO)：receive 接口把 snapImage base64 转存为 snapUrl
+# 对象存储(MinIO)：receive 接口把 snapImage base64 转存为 snapUrl；读出侧返回预签名 URL
 detect:
   oss:
     endpoint: ${MINIO_ENDPOINT:http://localhost:9000}
@@ -46,6 +46,10 @@ detect:
     secret-key: ${MINIO_SECRET_KEY:minioadmin}
     bucket: ${MINIO_BUCKET:detect}
     public-url: ${MINIO_PUBLIC_URL:http://localhost:9000}
+    # 预签名有效期(秒)：桶保持私有，列表/详情把库里稳定 URL 换成限时签名 URL，
+    # 浏览器 <img> 无需凭据即可取图（不会带 Authorization 头，所以不能走 JWT 代理）。
+    # 注意：public-url 必须是**浏览器可达**的地址，签名 URL 的 host 取自它。
+    presign-expire-seconds: ${MINIO_PRESIGN_EXPIRE:1800}
 
 management:
   endpoints:
