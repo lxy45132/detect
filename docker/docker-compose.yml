@@ -29,6 +29,11 @@ services:
     command: ["redis-server", "--appendonly", "yes"]
     volumes:
       - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
 
   nacos:
     image: nacos/nacos-server:v2.3.2
@@ -61,6 +66,118 @@ services:
     command: server /data --console-address ":9001"
     volumes:
       - minio-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # ==================== 应用服务 ====================
+  # 后端三件套 + 前端，与基础设施同处 compose 默认网络，用服务名互访。
+  # 关键：容器内互访用「服务名 + 容器端口」（mysql:3306），不是宿主机映射端口（3307）。
+  # 生产环境请修改各服务的 MYSQL_PASSWORD 与 mysql/minio 的账号密码（保持一致）。
+
+  detect-auth:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.backend
+      target: auth
+    image: detect/auth:1.0.0
+    container_name: detect-auth
+    restart: unless-stopped
+    environment:
+      NACOS_HOST: nacos
+      NACOS_PORT: 8848
+      MYSQL_HOST: mysql
+      MYSQL_PORT: 3306
+      MYSQL_USER: root
+      MYSQL_PASSWORD: root
+      TZ: Asia/Shanghai
+    depends_on:
+      mysql:
+        condition: service_healthy
+      nacos:
+        condition: service_healthy
+
+  detect-event:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.backend
+      target: event
+    image: detect/event:1.0.0
+    container_name: detect-event
+    restart: unless-stopped
+    environment:
+      NACOS_HOST: nacos
+      NACOS_PORT: 8848
+      MYSQL_HOST: mysql
+      MYSQL_PORT: 3306
+      MYSQL_USER: root
+      MYSQL_PASSWORD: root
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      # 容器网络内用服务名访问 auth 的 JWKS 公钥（默认 localhost 在容器里不通）
+      AUTH_JWKS_URI: http://detect-auth:8081/oauth2/jwks
+      # 服务端上传图片走容器内网
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+      MINIO_BUCKET: detect
+      # ★ 浏览器要可达：必须是服务器对外 IP/域名，不能是 localhost/minio，否则前端图片全裂
+      MINIO_PUBLIC_URL: http://${SERVER_IP:-localhost}:9000
+      TZ: Asia/Shanghai
+    ports:
+      # Python 视频分析引擎直连推送：POST http://<服务器IP>:8082/event-records/receive（带 from:Y 头）
+      - "8082:8082"
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      nacos:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      detect-auth:
+        condition: service_started
+
+  detect-gateway:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.backend
+      target: gateway
+    image: detect/gateway:1.0.0
+    container_name: detect-gateway
+    restart: unless-stopped
+    environment:
+      NACOS_HOST: nacos
+      NACOS_PORT: 8848
+      TZ: Asia/Shanghai
+    ports:
+      # 前端经 nginx 内部代理访问；此端口主要用于调试/直连，不需要对外可移除
+      - "9999:9999"
+    depends_on:
+      nacos:
+        condition: service_healthy
+      detect-auth:
+        condition: service_started
+      detect-event:
+        condition: service_started
+
+  detect-web:
+    build:
+      # 前端项目路径，默认对应 Code/{Java/Detect,Front/Detect} 兄弟布局；服务器不同则改 .env
+      context: ${FRONTEND_CONTEXT:-../../../Front/Detect}
+      dockerfile: Dockerfile
+    image: detect/web:1.0.0
+    container_name: detect-web
+    restart: unless-stopped
+    environment:
+      TZ: Asia/Shanghai
+    ports:
+      - "${WEB_HTTP_PORT:-80}:80"
+    depends_on:
+      - detect-gateway
 
 volumes:
   mysql-data:
