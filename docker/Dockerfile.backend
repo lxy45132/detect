@@ -1,0 +1,42 @@
+# syntax=docker/dockerfile:1
+# 后端多阶段构建：一次编译整个 Maven reactor，按 target 产出 auth/gateway/event 三个运行镜像。
+# BuildKit 下三个 target 共享 builder 层缓存，mvn 实际只完整编译一次。
+#
+# 构建上下文 = Java 项目根目录（detect/），docker-compose 中通过 target 选择运行镜像：
+#   docker build -f docker/Dockerfile.backend --target auth    ..
+#   docker build -f docker/Dockerfile.backend --target gateway ..
+#   docker build -f docker/Dockerfile.backend --target event   ..
+
+########## 构建阶段：编译并打包所有模块 ##########
+FROM maven:3.9-eclipse-temurin-17 AS builder
+WORKDIR /build
+COPY . .
+# cache mount 复用 ~/.m2 本地仓库，二次构建免重复下载依赖（需 BuildKit，Docker 20.10+ 默认开启）
+RUN --mount=type=cache,target=/root/.m2 mvn -B clean package -DskipTests
+
+########## 运行阶段：detect-auth (8081) ##########
+FROM eclipse-temurin:17-jre-jammy AS auth
+WORKDIR /app
+# MaxRAMPercentage 让 JVM 感知容器内存限额；egd 避免熵不足导致启动卡顿
+ENV JAVA_OPTS="-XX:MaxRAMPercentage=75.0 -Djava.security.egd=file:/dev/./urandom"
+# spring-boot repackage 后 fat jar 为 detect-auth-1.0.0.jar（.jar.original 不匹配 *.jar）
+COPY --from=builder /build/detect-auth/target/detect-auth-*.jar app.jar
+EXPOSE 8081
+ENTRYPOINT ["sh", "-c", "exec java $JAVA_OPTS -jar /app/app.jar"]
+
+########## 运行阶段：detect-gateway (9999) ##########
+FROM eclipse-temurin:17-jre-jammy AS gateway
+WORKDIR /app
+ENV JAVA_OPTS="-XX:MaxRAMPercentage=75.0 -Djava.security.egd=file:/dev/./urandom"
+COPY --from=builder /build/detect-gateway/target/detect-gateway-*.jar app.jar
+EXPOSE 9999
+ENTRYPOINT ["sh", "-c", "exec java $JAVA_OPTS -jar /app/app.jar"]
+
+########## 运行阶段：detect-event (8082) ##########
+FROM eclipse-temurin:17-jre-jammy AS event
+WORKDIR /app
+ENV JAVA_OPTS="-XX:MaxRAMPercentage=75.0 -Djava.security.egd=file:/dev/./urandom"
+# event 模块 pom 设置了 <finalName>detect-event</finalName>
+COPY --from=builder /build/detect-modules/detect-event/target/detect-event.jar app.jar
+EXPOSE 8082
+ENTRYPOINT ["sh", "-c", "exec java $JAVA_OPTS -jar /app/app.jar"]

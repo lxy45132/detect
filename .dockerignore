@@ -1,0 +1,22 @@
+# 构建上下文 = Java 项目根目录。排除无需进入 builder 的内容，减小上下文体积、避免本地产物污染。
+
+# Maven 构建产物（builder 内会重新 mvn package 生成）
+**/target/
+
+# 版本控制与 IDE
+.git/
+.gitignore
+.idea/
+*.iml
+*.ipr
+*.iws
+
+# 部署编排与配置（构建 Java 镜像用不到）
+docker/
+sql/
+.env
+.env.*
+
+# 文档
+*.md
+*.docx
